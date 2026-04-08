@@ -2,6 +2,7 @@
   "name": "edgetunnel",
   "version": "1.0.0",
   "private": true,
+  "packageManager": "pnpm@10.33.0",
   "type": "module",
   "scripts": {
     "test": "vitest run",
