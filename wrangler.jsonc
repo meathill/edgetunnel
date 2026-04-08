@@ -1,0 +1,15 @@
+{
+  "name": "edgetunnel",
+  "main": "_worker.js",
+  "compatibility_date": "2025-11-04",
+  "keep_vars": true,
+  "kv_namespaces": [
+    {
+      "binding": "KV",
+      "id": "5144876f9e99415e81b3a76dc1a3d575"
+    }
+  ],
+  "placement": {
+    "mode": "smart"
+  }
+}
