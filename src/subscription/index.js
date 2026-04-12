@@ -29,7 +29,7 @@ export async function handleSubscription(request, url, env, config_JSON, userID,
 	today.setHours(0, 0, 0, 0);
 	const UD = Math.floor(((now - today.getTime()) / 86400000) * 24 * 1099511627776 / 2);
 	let pagesSum = UD, workersSum = UD, total = 24 * 1099511627776;
-	if (config_JSON.CF.Usage.success) {
+	if (config_JSON.CF.Usage?.success) {
 		pagesSum = config_JSON.CF.Usage.pages;
 		workersSum = config_JSON.CF.Usage.workers;
 		total = Number.isFinite(config_JSON.CF.Usage.max) ? (config_JSON.CF.Usage.max / 1000) * 1024 : 1024 * 100;
