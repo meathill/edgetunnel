@@ -9,7 +9,10 @@
       "id": "5144876f9e99415e81b3a76dc1a3d575"
     }
   ],
+  "observability": {
+    "enabled": true
+  },
   "placement": {
-    "mode": "smart"
+    "region": "azure:japanwest"
   }
 }
