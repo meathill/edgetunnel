@@ -1,318 +1,249 @@
-import { log } from './utils/log.js';
-import { sha224 } from './utils/crypto.js';
-import { formatIdentifier } from './protocol.js';
-import { forwardataTCP, forwardataudp, closeSocketQuietly, isSpeedTestSite } from './tunnel.js';
+import { 创建日志器, log } from './utils/log.js';
+import { 获取叉HTTPPadding标识, 校验叉HTTPPadding, 生成叉HTTPPadding串 } from './xhttp-padding.js';
+import { 读取叉HTTP首包 } from './xhttp-protocol.js';
+import { isSpeedTestSite, 构造本地204响应 } from './speed-test.js';
+import { 失效TCP连接世代 } from './connection.js';
+import { forwardataTCP } from './tunnel.js';
+import { 创建上行Grain合包流 } from './streams/upload-stream.js';
+import { 有效数据长度 } from './utils/bytes.js';
+import { 转发木马UDP数据 } from './trojan-udp.js';
+import { forwardataudp } from './udp.js';
+import { closeSocketQuietly } from './utils/socket.js';
+export async function 处理叉HTTP请求(request, yourUUID, 反代上下文 = {}) {
+  const log = 创建日志器(反代上下文.调试日志打印);
+  if (!request.body) return new Response('Bad Request', { status: 400 });
+  const { 头: 本机Padding头, 键: 本机Padding键 } = 获取叉HTTPPadding标识(yourUUID);
+  if (!校验叉HTTPPadding(request, 本机Padding头, 本机Padding键)) return new Response('Bad Request', { status: 400 });
+  const reader = request.body.getReader();
+  const 首包 = await 读取叉HTTP首包(reader, yourUUID);
+  if (!首包) {
+    try {
+      reader.releaseLock();
+    } catch (e) {}
+    return new Response('Invalid request', { status: 400 });
+  }
+  if (isSpeedTestSite(首包.hostname) && 反代上下文.代理类型 === null) {
+    try {
+      reader.releaseLock();
+    } catch (e) {}
+    return new Response(构造本地204响应(首包.respHeader), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-Accel-Buffering': 'no',
+        'Cache-Control': 'no-store',
+      },
+    });
+  }
+  if (首包.isUDP && 首包.协议 !== 'trojan' && 首包.port !== 53) {
+    try {
+      reader.releaseLock();
+    } catch (e) {}
+    return new Response('UDP is not supported', { status: 400 });
+  }
 
-/**
- * @param {Uint8Array} data
- * @returns {number}
- */
-function 有效数据长度(data) {
-	if (!data) return 0;
-	if (typeof data.byteLength === 'number') return data.byteLength;
-	if (typeof data.length === 'number') return data.length;
-	return 0;
+  const responseHeaders = new Headers({
+    'Content-Type': 'application/octet-stream',
+    'X-Accel-Buffering': 'no',
+    'Cache-Control': 'no-store',
+  });
+
+  try {
+    const 响应URL = new URL('https://x.invalid/');
+    响应URL.searchParams.set(本机Padding键, 生成叉HTTPPadding串(100 + Math.floor(Math.random() * 901)));
+    responseHeaders.set(本机Padding头, 响应URL.toString());
+  } catch (e) {}
+
+  if (首包.isUDP) return 处理叉HTTPUDP请求(首包, reader, request, 反代上下文, responseHeaders);
+
+  try {
+    reader.releaseLock();
+  } catch (e) {}
+
+  const remoteConnWrapper = {
+    socket: null,
+    connectingPromise: null,
+    retryConnect: null,
+    downlinkDrain: Promise.resolve(),
+  };
+  const abortController = new AbortController();
+  let 已清理 = false;
+  const 清理 = (reason) => {
+    if (已清理) return;
+    已清理 = true;
+    try {
+      abortController.abort(reason);
+    } catch (e) {}
+    失效TCP连接世代(remoteConnWrapper);
+  };
+
+  const 占位WS = { readyState: WebSocket.OPEN };
+
+  let socket;
+  try {
+    socket = await forwardataTCP(
+      首包.hostname,
+      首包.port,
+      首包.rawData,
+      占位WS,
+      首包.respHeader,
+      remoteConnWrapper,
+      yourUUID,
+      request,
+      反代上下文,
+      首包.协议 === 'trojan',
+      首包.原始数据,
+      true,
+    );
+  } catch (err) {
+    log(`[叉HTTP-Pipe] 连接失败: ${err?.message || err}`);
+    清理(err);
+    return new Response('bad gateway', { status: 502 });
+  }
+  if (!socket) {
+    清理(new Error('socket is null'));
+    return new Response('bad gateway', { status: 502 });
+  }
+
+  const 上行Promise = (async () => {
+    const 上行合包器 = 创建上行Grain合包流();
+    const 搬运Promise = 上行合包器.readable.pipeTo(socket.writable, { signal: abortController.signal });
+    void 搬运Promise.catch(清理);
+    const 上行reader = request.body.getReader();
+    const 取消上行reader = () => {
+      try {
+        上行reader.cancel(abortController.signal.reason).catch(() => {});
+      } catch (e) {}
+    };
+    abortController.signal.addEventListener('abort', 取消上行reader, { once: true });
+    try {
+      try {
+        while (true) {
+          const { done, value } = await 上行reader.read();
+          if (done) break;
+          if (value?.byteLength) await 上行合包器.写入(value);
+        }
+      } finally {
+        abortController.signal.removeEventListener('abort', 取消上行reader);
+        try {
+          上行reader.releaseLock();
+        } catch (e) {}
+      }
+    } finally {
+      try {
+        await 上行合包器.结束();
+      } catch (e) {}
+    }
+    await 搬运Promise;
+  })();
+
+  const 响应流 = typeof IdentityTransformStream !== 'undefined' ? new IdentityTransformStream() : new TransformStream();
+  const 下行Promise = (async () => {
+    const writer = 响应流.writable.getWriter();
+    try {
+      if (有效数据长度(首包.respHeader) > 0) await writer.write(首包.respHeader);
+    } catch (error) {
+      try {
+        await writer.abort(error);
+      } catch (e) {}
+      throw error;
+    } finally {
+      try {
+        writer.releaseLock();
+      } catch (e) {}
+    }
+    await socket.readable.pipeTo(响应流.writable, { signal: abortController.signal });
+  })();
+
+  void 上行Promise.catch(清理);
+  void 下行Promise.then(() => 清理(), 清理);
+  void Promise.allSettled([上行Promise, 下行Promise]);
+
+  return new Response(响应流.readable, { status: 200, headers: responseHeaders });
 }
 
-/**
- * @param {ReadableStreamDefaultReader} reader
- * @param {string} token
- * @returns {Promise<{协议: string, hostname: string, port: number, isUDP: boolean, rawData: Uint8Array, respHeader: Uint8Array|null, reader: ReadableStreamDefaultReader}|null>}
- */
-async function 读取XHTTP首包(reader, token) {
-	const decoder = new TextDecoder();
-	const 密码哈希 = sha224(token);
-	const 密码哈希字节 = new TextEncoder().encode(密码哈希);
-
-	const 尝试解析VLESS首包 = (data) => {
-		const length = data.byteLength;
-		if (length < 18) return { 状态: 'need_more' };
-		if (formatIdentifier(data.subarray(1, 17)) !== token) return { 状态: 'invalid' };
-
-		const optLen = data[17];
-		const cmdIndex = 18 + optLen;
-		if (length < cmdIndex + 1) return { 状态: 'need_more' };
-
-		const cmd = data[cmdIndex];
-		if (cmd !== 1 && cmd !== 2) return { 状态: 'invalid' };
-
-		const portIndex = cmdIndex + 1;
-		if (length < portIndex + 3) return { 状态: 'need_more' };
-
-		const port = (data[portIndex] << 8) | data[portIndex + 1];
-		const addressType = data[portIndex + 2];
-		const addressIndex = portIndex + 3;
-		let headerLen = -1;
-		let hostname = '';
-
-		if (addressType === 1) {
-			if (length < addressIndex + 4) return { 状态: 'need_more' };
-			hostname = `${data[addressIndex]}.${data[addressIndex + 1]}.${data[addressIndex + 2]}.${data[addressIndex + 3]}`;
-			headerLen = addressIndex + 4;
-		} else if (addressType === 2) {
-			if (length < addressIndex + 1) return { 状态: 'need_more' };
-			const domainLen = data[addressIndex];
-			if (length < addressIndex + 1 + domainLen) return { 状态: 'need_more' };
-			hostname = decoder.decode(data.subarray(addressIndex + 1, addressIndex + 1 + domainLen));
-			headerLen = addressIndex + 1 + domainLen;
-		} else if (addressType === 3) {
-			if (length < addressIndex + 16) return { 状态: 'need_more' };
-			const ipv6 = [];
-			for (let i = 0; i < 8; i++) {
-				const base = addressIndex + i * 2;
-				ipv6.push(((data[base] << 8) | data[base + 1]).toString(16));
-			}
-			hostname = ipv6.join(':');
-			headerLen = addressIndex + 16;
-		} else return { 状态: 'invalid' };
-
-		if (!hostname) return { 状态: 'invalid' };
-
-		return {
-			状态: 'ok',
-			结果: {
-				协议: 'vl' + 'ess',
-				hostname,
-				port,
-				isUDP: cmd === 2,
-				rawData: data.subarray(headerLen),
-				respHeader: new Uint8Array([data[0], 0]),
-			}
-		};
-	};
-
-	const 尝试解析木马首包 = (data) => {
-		const length = data.byteLength;
-		if (length < 58) return { 状态: 'need_more' };
-		if (data[56] !== 0x0d || data[57] !== 0x0a) return { 状态: 'invalid' };
-		for (let i = 0; i < 56; i++) {
-			if (data[i] !== 密码哈希字节[i]) return { 状态: 'invalid' };
-		}
-
-		const socksStart = 58;
-		if (length < socksStart + 2) return { 状态: 'need_more' };
-		const cmd = data[socksStart];
-		if (cmd !== 1) return { 状态: 'invalid' };
-
-		const atype = data[socksStart + 1];
-		let cursor = socksStart + 2;
-		let hostname = '';
-
-		if (atype === 1) {
-			if (length < cursor + 4) return { 状态: 'need_more' };
-			hostname = `${data[cursor]}.${data[cursor + 1]}.${data[cursor + 2]}.${data[cursor + 3]}`;
-			cursor += 4;
-		} else if (atype === 3) {
-			if (length < cursor + 1) return { 状态: 'need_more' };
-			const domainLen = data[cursor];
-			if (length < cursor + 1 + domainLen) return { 状态: 'need_more' };
-			hostname = decoder.decode(data.subarray(cursor + 1, cursor + 1 + domainLen));
-			cursor += 1 + domainLen;
-		} else if (atype === 4) {
-			if (length < cursor + 16) return { 状态: 'need_more' };
-			const ipv6 = [];
-			for (let i = 0; i < 8; i++) {
-				const base = cursor + i * 2;
-				ipv6.push(((data[base] << 8) | data[base + 1]).toString(16));
-			}
-			hostname = ipv6.join(':');
-			cursor += 16;
-		} else return { 状态: 'invalid' };
-
-		if (!hostname) return { 状态: 'invalid' };
-		if (length < cursor + 4) return { 状态: 'need_more' };
-
-		const port = (data[cursor] << 8) | data[cursor + 1];
-		if (data[cursor + 2] !== 0x0d || data[cursor + 3] !== 0x0a) return { 状态: 'invalid' };
-		const dataOffset = cursor + 4;
-
-		return {
-			状态: 'ok',
-			结果: {
-				协议: 'trojan',
-				hostname,
-				port,
-				isUDP: false,
-				rawData: data.subarray(dataOffset),
-				respHeader: null,
-			}
-		};
-	};
-
-	let buffer = new Uint8Array(1024);
-	let offset = 0;
-
-	while (true) {
-		const { value, done } = await reader.read();
-		if (done) {
-			if (offset === 0) return null;
-			break;
-		}
-
-		const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
-		if (offset + chunk.byteLength > buffer.byteLength) {
-			const newBuffer = new Uint8Array(Math.max(buffer.byteLength * 2, offset + chunk.byteLength));
-			newBuffer.set(buffer.subarray(0, offset));
-			buffer = newBuffer;
-		}
-
-		buffer.set(chunk, offset);
-		offset += chunk.byteLength;
-
-		const 当前数据 = buffer.subarray(0, offset);
-		const 木马结果 = 尝试解析木马首包(当前数据);
-		if (木马结果.状态 === 'ok') return { ...木马结果.结果, reader };
-
-		const vless结果 = 尝试解析VLESS首包(当前数据);
-		if (vless结果.状态 === 'ok') return { ...vless结果.结果, reader };
-
-		if (木马结果.状态 === 'invalid' && vless结果.状态 === 'invalid') return null;
-	}
-
-	const 最终数据 = buffer.subarray(0, offset);
-	const 最终木马结果 = 尝试解析木马首包(最终数据);
-	if (最终木马结果.状态 === 'ok') return { ...最终木马结果.结果, reader };
-	const 最终VLESS结果 = 尝试解析VLESS首包(最终数据);
-	if (最终VLESS结果.状态 === 'ok') return { ...最终VLESS结果.结果, reader };
-	return null;
-}
-
-/**
- * @param {Request} request
- * @param {string} yourUUID
- * @returns {Promise<Response>}
- */
-export async function 处理XHTTP请求(request, yourUUID) {
-	if (!request.body) return new Response('Bad Request', { status: 400 });
-	const reader = request.body.getReader();
-	const 首包 = await 读取XHTTP首包(reader, yourUUID);
-	if (!首包) {
-		try { reader.releaseLock() } catch (e) { }
-		return new Response('Invalid request', { status: 400 });
-	}
-	if (isSpeedTestSite(首包.hostname)) {
-		try { reader.releaseLock() } catch (e) { }
-		return new Response('Forbidden', { status: 403 });
-	}
-	if (首包.isUDP && 首包.port !== 53) {
-		try { reader.releaseLock() } catch (e) { }
-		return new Response('UDP is not supported', { status: 400 });
-	}
-
-	const remoteConnWrapper = { socket: null, connectingPromise: null, retryConnect: null };
-	let 当前写入Socket = null;
-	let 远端写入器 = null;
-	const responseHeaders = new Headers({
-		'Content-Type': 'application/octet-stream',
-		'X-Accel-Buffering': 'no',
-		'Cache-Control': 'no-store'
-	});
-
-	const 释放远端写入器 = () => {
-		if (远端写入器) {
-			try { 远端写入器.releaseLock() } catch (e) { }
-			远端写入器 = null;
-		}
-		当前写入Socket = null;
-	};
-
-	const 获取远端写入器 = () => {
-		const socket = remoteConnWrapper.socket;
-		if (!socket) return null;
-		if (socket !== 当前写入Socket) {
-			释放远端写入器();
-			当前写入Socket = socket;
-			远端写入器 = socket.writable.getWriter();
-		}
-		return 远端写入器;
-	};
-
-	return new Response(new ReadableStream({
-		async start(controller) {
-			let 已关闭 = false;
-			let udpRespHeader = 首包.respHeader;
-			const xhttpBridge = {
-				readyState: WebSocket.OPEN,
-				send(data) {
-					if (已关闭) return;
-					try {
-						const chunk = data instanceof Uint8Array
-							? data
-							: data instanceof ArrayBuffer
-								? new Uint8Array(data)
-								: ArrayBuffer.isView(data)
-									? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
-									: new Uint8Array(data);
-						controller.enqueue(chunk);
-					} catch (e) {
-						已关闭 = true;
-						this.readyState = WebSocket.CLOSED;
-					}
-				},
-				close() {
-					if (已关闭) return;
-					已关闭 = true;
-					this.readyState = WebSocket.CLOSED;
-					try { controller.close() } catch (e) { }
-				}
-			};
-
-			const 写入远端 = async (payload, allowRetry = true) => {
-				const writer = 获取远端写入器();
-				if (!writer) return false;
-				try {
-					await writer.write(payload);
-					return true;
-				} catch (err) {
-					释放远端写入器();
-					if (allowRetry && typeof remoteConnWrapper.retryConnect === 'function') {
-						await remoteConnWrapper.retryConnect();
-						return await 写入远端(payload, false);
-					}
-					throw err;
-				}
-			};
-
-			try {
-				if (首包.isUDP) {
-					if (首包.rawData?.byteLength) {
-						await forwardataudp(首包.rawData, xhttpBridge, udpRespHeader);
-						udpRespHeader = null;
-					}
-				} else {
-					await forwardataTCP(首包.hostname, 首包.port, 首包.rawData, xhttpBridge, 首包.respHeader, remoteConnWrapper, yourUUID);
-				}
-
-				while (true) {
-					const { done, value } = await reader.read();
-					if (done) break;
-					if (!value || value.byteLength === 0) continue;
-					if (首包.isUDP) {
-						await forwardataudp(value, xhttpBridge, udpRespHeader);
-						udpRespHeader = null;
-					} else {
-						if (!(await 写入远端(value))) throw new Error('Remote socket is not ready');
-					}
-				}
-
-				if (!首包.isUDP) {
-					const writer = 获取远端写入器();
-					if (writer) {
-						try { await writer.close() } catch (e) { }
-					}
-				}
-			} catch (err) {
-				log(`[XHTTP转发] 处理失败: ${err?.message || err}`);
-				closeSocketQuietly(xhttpBridge);
-			} finally {
-				释放远端写入器();
-				try { reader.releaseLock() } catch (e) { }
-			}
-		},
-		cancel() {
-			释放远端写入器();
-			try { remoteConnWrapper.socket?.close() } catch (e) { }
-			try { reader.releaseLock() } catch (e) { }
-		}
-	}), { status: 200, headers: responseHeaders });
+export function 处理叉HTTPUDP请求(首包, reader, request, 反代上下文, responseHeaders) {
+  const 木马UDP上下文 = { 缓存: new Uint8Array(0), 反代地址: 反代上下文.木马反代地址 };
+  return new Response(
+    new ReadableStream({
+      async start(controller) {
+        let 已关闭 = false;
+        let udpRespHeader = 首包.respHeader;
+        const 叉桥 = {
+          readyState: WebSocket.OPEN,
+          send(data) {
+            if (已关闭) return;
+            try {
+              const chunk =
+                data instanceof Uint8Array
+                  ? data
+                  : data instanceof ArrayBuffer
+                    ? new Uint8Array(data)
+                    : ArrayBuffer.isView(data)
+                      ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+                      : new Uint8Array(data);
+              controller.enqueue(chunk);
+            } catch (e) {
+              已关闭 = true;
+              this.readyState = WebSocket.CLOSED;
+            }
+          },
+          close() {
+            if (已关闭) return;
+            已关闭 = true;
+            this.readyState = WebSocket.CLOSED;
+            try {
+              controller.close();
+            } catch (e) {}
+          },
+        };
+        let 转发失败 = false;
+        try {
+          if (首包.协议 === 'trojan') {
+            木马UDP上下文.目标主机 = 首包.hostname;
+            木马UDP上下文.目标端口 = 首包.port;
+            if (木马UDP上下文.反代地址) await 转发木马UDP数据(首包.原始数据, 叉桥, 木马UDP上下文, request);
+          }
+          if (!(首包.协议 === 'trojan' && 木马UDP上下文.反代地址) && 首包.rawData?.byteLength) {
+            if (首包.协议 === 'trojan') await 转发木马UDP数据(首包.rawData, 叉桥, 木马UDP上下文, request);
+            else await forwardataudp(首包.rawData, 叉桥, udpRespHeader, request);
+            udpRespHeader = null;
+          }
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!value || value.byteLength === 0) continue;
+            if (首包.协议 === 'trojan') await 转发木马UDP数据(value, 叉桥, 木马UDP上下文, request);
+            else await forwardataudp(value, 叉桥, udpRespHeader, request);
+            udpRespHeader = null;
+          }
+        } catch (err) {
+          转发失败 = true;
+          log(`[叉HTTP转发] 处理失败: ${err?.message || err}`);
+          closeSocketQuietly(叉桥);
+        } finally {
+          const 保持木马UDP反代下行 =
+            !转发失败 && 首包.协议 === 'trojan' && 木马UDP上下文.反代地址 && 木马UDP上下文.反代Socket;
+          if (!保持木马UDP反代下行) {
+            try {
+              木马UDP上下文.反代Socket?.close();
+            } catch (e) {}
+            closeSocketQuietly(叉桥);
+          }
+          try {
+            reader.releaseLock();
+          } catch (e) {}
+        }
+      },
+      cancel() {
+        try {
+          木马UDP上下文.反代Socket?.close();
+        } catch (e) {}
+        try {
+          reader.releaseLock();
+        } catch (e) {}
+      },
+    }),
+    { status: 200, headers: responseHeaders },
+  );
 }

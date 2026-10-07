@@ -1,71 +1,91 @@
-import { log } from './utils/log.js';
+import { 特征码字典, 汇聚订阅_UA } from './state.js';
 import { 整理成数组 } from './utils/format.js';
-
-/**
- * Generate random Cloudflare IPs from CIDR ranges based on the client's ISP.
- *
- * Fetches ISP-specific or generic CF CIDR lists and generates random IPs
- * with appropriate ports for TLS or non-TLS connections.
- *
- * @param {Request} request - The incoming request (used for cf.asn)
- * @param {number} [count=16] - Number of random IPs to generate
- * @param {number} [指定端口=-1] - Specific port to use (-1 for random)
- * @param {boolean} [TLS=true] - Whether to use TLS ports
- * @returns {Promise<[string[], string]>} Tuple of [IP array, newline-joined string]
- */
-export async function 生成随机IP(request, count = 16, 指定端口 = -1, TLS = true) {
-  const ISP配置 = {
-    '9808': { file: 'cmcc', name: 'CF移动优选' },
-    '4837': { file: 'cu', name: 'CF联通优选' },
-    '17623': { file: 'cu', name: 'CF联通优选' },
-    '17816': { file: 'cu', name: 'CF联通优选' },
-    '4134': { file: 'ct', name: 'CF电信优选' },
+export function 识别运营商(request) {
+  const cf = request?.cf;
+  const ASN运营商映射 = {
+    4134: 'ct',
+    4809: 'ct',
+    4811: 'ct',
+    4812: 'ct',
+    4815: 'ct',
+    4837: 'cu',
+    4814: 'cu',
+    9929: 'cu',
+    17623: 'cu',
+    17816: 'cu',
+    9808: 'cmcc',
+    24400: 'cmcc',
+    56040: 'cmcc',
+    56041: 'cmcc',
+    56044: 'cmcc',
   };
-  const asn = request.cf.asn, isp = ISP配置[asn];
-  const cidr_url = isp ? `https://raw.githubusercontent.com/cmliu/cmliu/main/CF-CIDR/${isp.file}.txt` : 'https://raw.githubusercontent.com/cmliu/cmliu/main/CF-CIDR.txt';
-  const cfname = isp?.name || 'CF官方优选';
-  const cfport = TLS ? [443, 2053, 2083, 2087, 2096, 8443] : [80, 8080, 8880, 2052, 2082, 2086, 2095];
+  const 运营商关键词映射 = [
+    { code: 'ct', pattern: /chinanet|chinatelecom|china telecom|cn2|shtel/ },
+    { code: 'cmcc', pattern: /cmi|cmnet|chinamobile|china mobile|cmcc|mobile communications/ },
+    { code: 'cu', pattern: /china169|china unicom|chinaunicom|cucc|cncgroup|cuii|netcom/ },
+  ];
+  if (String(cf?.country || '').toLowerCase() !== 'cn') return 'cf';
+  const 组织名称 = String(cf?.asOrganization || '').toLowerCase();
+  const 命中运营商 = 运营商关键词映射.find(({ pattern }) => pattern.test(组织名称))?.code;
+  return 命中运营商 || ASN运营商映射[String(cf?.asn || '')] || 'cf';
+}
+
+export async function 生成随机IP(request, count = 16, 指定端口 = -1) {
+  const url = new URL(request.url);
+  const 查询参数运营商 = String(url.searchParams.get('cnIspCode') || '').toLowerCase();
+  const 运营商文件标识 = ['ct', 'cu', 'cmcc', 'cf'].includes(查询参数运营商) ? 查询参数运营商 : 识别运营商(request);
+  const 运营商名称映射 = {
+    cmcc: 'CF移动优选',
+    cu: 'CF联通优选',
+    ct: 'CF电信优选',
+    cf: 'CF官方优选',
+  };
+  const cidr_url =
+    运营商文件标识 === 'cf'
+      ? `https://raw.githubusercontent.com/${特征码字典[1]}/${特征码字典[1]}/main/CF-CIDR.txt`
+      : `https://raw.githubusercontent.com/${特征码字典[1]}/${特征码字典[1]}/main/CF-CIDR/${运营商文件标识}.txt`;
+  const cfname = 运营商名称映射[运营商文件标识] || 'CF官方优选';
+  const cfport = [443, 2053, 2083, 2087, 2096, 8443];
   let cidrList = [];
-  try { const res = await fetch(cidr_url); cidrList = res.ok ? await 整理成数组(await res.text()) : ['104.16.0.0/13'] } catch { cidrList = ['104.16.0.0/13'] }
+  try {
+    const res = await fetch(cidr_url);
+    cidrList = res.ok ? await 整理成数组(await res.text()) : ['104.16.0.0/13'];
+  } catch {
+    cidrList = ['104.16.0.0/13'];
+  }
 
   const generateRandomIPFromCIDR = (cidr) => {
-    const [baseIP, prefixLength] = cidr.split('/'), prefix = parseInt(prefixLength), hostBits = 32 - prefix;
+    const [baseIP, prefixLength] = cidr.split('/'),
+      prefix = parseInt(prefixLength),
+      hostBits = 32 - prefix;
     const ipInt = baseIP.split('.').reduce((a, p, i) => a | (parseInt(p) << (24 - i * 8)), 0);
     const randomOffset = Math.floor(Math.random() * Math.pow(2, hostBits));
-    const mask = (0xFFFFFFFF << hostBits) >>> 0, randomIP = (((ipInt & mask) >>> 0) + randomOffset) >>> 0;
-    return [(randomIP >>> 24) & 0xFF, (randomIP >>> 16) & 0xFF, (randomIP >>> 8) & 0xFF, randomIP & 0xFF].join('.');
+    const mask = (0xffffffff << hostBits) >>> 0,
+      randomIP = (((ipInt & mask) >>> 0) + randomOffset) >>> 0;
+    return [(randomIP >>> 24) & 0xff, (randomIP >>> 16) & 0xff, (randomIP >>> 8) & 0xff, randomIP & 0xff].join('.');
   };
-  const TLS端口 = [443, 2053, 2083, 2087, 2096, 8443];
-  const NOTLS端口 = [80, 2052, 2082, 2086, 2095, 8080];
-
   const randomIPs = Array.from({ length: count }, (_, index) => {
     const ip = generateRandomIPFromCIDR(cidrList[Math.floor(Math.random() * cidrList.length)]);
-    const 目标端口 = 指定端口 === -1
-      ? cfport[Math.floor(Math.random() * cfport.length)]
-      : (TLS ? 指定端口 : (NOTLS端口[TLS端口.indexOf(Number(指定端口))] ?? 指定端口));
+    const 目标端口 = 指定端口 === -1 ? cfport[Math.floor(Math.random() * cfport.length)] : 指定端口;
     return `${ip}:${目标端口}#${cfname}${index + 1}`;
   });
   return [randomIPs, randomIPs.join('\n')];
 }
 
-/**
- * Fetch best-IP data from an external subscription generator.
- *
- * Sends a probe request to the subscription generator and parses the
- * response into preferred IPs and other node links.
- *
- * @param {string} 优选订阅生成器HOST - Subscription generator host/URL
- * @returns {Promise<[string[], string]>} Tuple of [preferred IPs, other node links]
- */
 export async function 获取优选订阅生成器数据(优选订阅生成器HOST) {
-  let 优选IP = [], 其他节点LINK = '', 格式化HOST = 优选订阅生成器HOST.replace(/^sub:\/\//i, 'https://').split('#')[0].split('?')[0];
+  let 优选IP = [],
+    其他节点LINK = '',
+    格式化HOST = 优选订阅生成器HOST
+      .replace(/^sub:\/\//i, 'https://')
+      .split('#')[0]
+      .split('?')[0];
   if (!/^https?:\/\//i.test(格式化HOST)) 格式化HOST = `https://${格式化HOST}`;
 
   try {
     const url = new URL(格式化HOST);
     格式化HOST = url.origin;
   } catch (error) {
-    优选IP.push(`127.0.0.1:1234#${优选订阅生成器HOST}优选订阅生成器格式化异常`);
+    优选IP.push(`127.0.0.1:1234#${优选订阅生成器HOST}优选订阅生成器格式化异常:${error.message}`);
     return [优选IP, 其他节点LINK];
   }
 
@@ -73,7 +93,7 @@ export async function 获取优选订阅生成器数据(优选订阅生成器HOS
 
   try {
     const response = await fetch(优选订阅生成器URL, {
-      headers: { 'User-Agent': 'v2rayN/edge' + 'tunnel (https://github.com/cmliu/edge' + 'tunnel)' }
+      headers: { 'User-Agent': 汇聚订阅_UA },
     });
 
     if (!response.ok) {
@@ -92,7 +112,8 @@ export async function 获取优选订阅生成器数据(优选订阅生成器HOS
         // 这是优选IP行，提取 域名:端口#备注
         const 地址匹配 = 行内容.match(/:\/\/[^@]+@([^?]+)/);
         if (地址匹配) {
-          let 地址端口 = 地址匹配[1], 备注 = ''; // 域名:端口 或 IP:端口
+          let 地址端口 = 地址匹配[1],
+            备注 = ''; // 域名:端口 或 IP:端口
           const 备注匹配 = 行内容.match(/#(.+)$/);
           if (备注匹配) 备注 = '#' + decodeURIComponent(备注匹配[1]);
           优选IP.push(地址端口 + 备注);
@@ -102,216 +123,241 @@ export async function 获取优选订阅生成器数据(优选订阅生成器HOS
       }
     }
   } catch (error) {
-    优选IP.push(`127.0.0.1:1234#${优选订阅生成器HOST}优选订阅生成器异常`);
+    优选IP.push(`127.0.0.1:1234#${优选订阅生成器HOST}优选订阅生成器异常:${error.message}`);
   }
 
   return [优选IP, 其他节点LINK];
 }
 
-/**
- * Fetch best IPs from multiple API URLs in parallel.
- *
- * Supports plain IP lists, CSV formats, base64-encoded subscriptions,
- * protocol link subscriptions, and sub:// subscription generator URLs.
- *
- * @param {string[]} urls - Array of API URLs to fetch from
- * @param {string} [默认端口='443'] - Default port when not specified
- * @param {number} [超时时间=3000] - Request timeout in milliseconds
- * @returns {Promise<[string[], string[], string[], string[]]>} Tuple of
- *   [preferred IPs, decoded LINK lines, URLs needing subscription conversion, proxy IP pool]
- */
 export async function 请求优选API(urls, 默认端口 = '443', 超时时间 = 3000) {
   if (!urls?.length) return [[], [], [], []];
-  const results = new Set(), 反代IP池 = new Set();
-  let 订阅链接响应的明文LINK内容 = '', 需要订阅转换订阅URLs = [];
-  await Promise.allSettled(urls.map(async (url) => {
-    // 检查URL是否包含备注名
-    const hashIndex = url.indexOf('#');
-    const urlWithoutHash = hashIndex > -1 ? url.substring(0, hashIndex) : url;
-    const API备注名 = hashIndex > -1 ? decodeURIComponent(url.substring(hashIndex + 1)) : null;
-    const 优选IP作为反代IP = url.toLowerCase().includes('proxyip=true');
-    if (urlWithoutHash.toLowerCase().startsWith('sub://')) {
-      try {
-        const [优选IP, 其他节点LINK] = await 获取优选订阅生成器数据(urlWithoutHash);
-        // 处理第一个数组 - 优选IP
-        if (API备注名) {
-          for (const ip of 优选IP) {
-            const 处理后IP = ip.includes('#')
-              ? `${ip} [${API备注名}]`
-              : `${ip}#[${API备注名}]`;
-            results.add(处理后IP);
-            if (优选IP作为反代IP) 反代IP池.add(ip.split('#')[0]);
-          }
-        } else {
-          for (const ip of 优选IP) {
-            results.add(ip);
-            if (优选IP作为反代IP) 反代IP池.add(ip.split('#')[0]);
-          }
-        }
-        // 处理第二个数组 - 其他节点LINK
-        if (其他节点LINK && typeof 其他节点LINK === 'string' && API备注名) {
-          const 处理后LINK内容 = 其他节点LINK.replace(/([a-z][a-z0-9+\-.]*:\/\/[^\r\n]*?)(\r?\n|$)/gi, (match, link, lineEnd) => {
-            const 完整链接 = link.includes('#')
-              ? `${link}${encodeURIComponent(` [${API备注名}]`)}`
-              : `${link}${encodeURIComponent(`#[${API备注名}]`)}`;
-            return `${完整链接}${lineEnd}`;
-          });
-          订阅链接响应的明文LINK内容 += 处理后LINK内容;
-        } else if (其他节点LINK && typeof 其他节点LINK === 'string') {
-          订阅链接响应的明文LINK内容 += 其他节点LINK;
-        }
-      } catch (e) { }
-      return;
-    }
-
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 超时时间);
-      const response = await fetch(urlWithoutHash, { signal: controller.signal });
-      clearTimeout(timeoutId);
-      let text = '';
-      try {
-        const buffer = await response.arrayBuffer();
-        const contentType = (response.headers.get('content-type') || '').toLowerCase();
-        const charset = contentType.match(/charset=([^\s;]+)/i)?.[1]?.toLowerCase() || '';
-
-        // 根据 Content-Type 响应头判断编码优先级
-        let decoders = ['utf-8', 'gb2312']; // 默认优先 UTF-8
-        if (charset.includes('gb') || charset.includes('gbk') || charset.includes('gb2312')) {
-          decoders = ['gb2312', 'utf-8']; // 如果明确指定 GB 系编码，优先尝试 GB2312
-        }
-
-        // 尝试多种编码解码
-        let decodeSuccess = false;
-        for (const decoder of decoders) {
-          try {
-            const decoded = new TextDecoder(decoder).decode(buffer);
-            // 验证解码结果的有效性
-            if (decoded && decoded.length > 0 && !decoded.includes('\ufffd')) {
-              text = decoded;
-              decodeSuccess = true;
-              break;
-            } else if (decoded && decoded.length > 0) {
-              // 如果有替换字符 (U+FFFD)，说明编码不匹配，继续尝试下一个编码
-              continue;
-            }
-          } catch (e) {
-            // 该编码解码失败，尝试下一个
-            continue;
-          }
-        }
-
-        // 如果所有编码都失败或无效，尝试 response.text()
-        if (!decodeSuccess) {
-          text = await response.text();
-        }
-
-        // 如果返回的是空或无效数据，返回
-        if (!text || text.trim().length === 0) {
-          return;
-        }
-      } catch (e) {
-        console.error('Failed to decode response:', e);
-        return;
-      }
-
-      let 预处理订阅明文内容 = text;
-      const cleanText = typeof text === 'string' ? text.replace(/\s/g, '') : '';
-      if (cleanText.length > 0 && cleanText.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(cleanText)) {
+  const results = new Set(),
+    反代IP池 = new Set();
+  let 订阅链接响应的明文LINK内容 = '',
+    需要订阅转换订阅URLs = [];
+  await Promise.allSettled(
+    urls.map(async (url) => {
+      // 检查URL是否包含备注名
+      const hashIndex = url.indexOf('#');
+      const urlWithoutHash = hashIndex > -1 ? url.substring(0, hashIndex) : url;
+      const API备注名 = hashIndex > -1 ? decodeURIComponent(url.substring(hashIndex + 1)) : null;
+      const 优选IP作为反代IP = url.toLowerCase().includes('proxyip=true');
+      if (urlWithoutHash.toLowerCase().startsWith('sub://')) {
         try {
-          const bytes = new Uint8Array(atob(cleanText).split('').map(c => c.charCodeAt(0)));
-          预处理订阅明文内容 = new TextDecoder('utf-8').decode(bytes);
-        } catch { }
-      }
-      if (预处理订阅明文内容.split('#')[0].includes('://')) {
-        // 处理LINK内容
-        if (API备注名) {
-          const 处理后LINK内容 = 预处理订阅明文内容.replace(/([a-z][a-z0-9+\-.]*:\/\/[^\r\n]*?)(\r?\n|$)/gi, (match, link, lineEnd) => {
-            const 完整链接 = link.includes('#')
-              ? `${link}${encodeURIComponent(` [${API备注名}]`)}`
-              : `${link}${encodeURIComponent(`#[${API备注名}]`)}`;
-            return `${完整链接}${lineEnd}`;
-          });
-          订阅链接响应的明文LINK内容 += 处理后LINK内容 + '\n';
-        } else {
-          订阅链接响应的明文LINK内容 += 预处理订阅明文内容 + '\n';
-        }
-        return;
-      }
-
-      const lines = text.trim().split('\n').map(l => l.trim()).filter(l => l);
-      const isCSV = lines.length > 1 && lines[0].includes(',');
-      const IPV6_PATTERN = /^[^\[\]]*:[^\[\]]*:[^\[\]]/;
-      const parsedUrl = new URL(urlWithoutHash);
-      if (!isCSV) {
-        lines.forEach(line => {
-          const lineHashIndex = line.indexOf('#');
-          const [hostPart, remark] = lineHashIndex > -1 ? [line.substring(0, lineHashIndex), line.substring(lineHashIndex)] : [line, ''];
-          let hasPort = false;
-          if (hostPart.startsWith('[')) {
-            hasPort = /\]:(\d+)$/.test(hostPart);
-          } else {
-            const colonIndex = hostPart.lastIndexOf(':');
-            hasPort = colonIndex > -1 && /^\d+$/.test(hostPart.substring(colonIndex + 1));
-          }
-          const port = parsedUrl.searchParams.get('port') || 默认端口;
-          const ipItem = hasPort ? line : `${hostPart}:${port}${remark}`;
+          const [优选IP, 其他节点LINK] = await 获取优选订阅生成器数据(urlWithoutHash);
           // 处理第一个数组 - 优选IP
           if (API备注名) {
-            const 处理后IP = ipItem.includes('#')
-              ? `${ipItem} [${API备注名}]`
-              : `${ipItem}#[${API备注名}]`;
-            results.add(处理后IP);
+            for (const ip of 优选IP) {
+              const 处理后IP = ip.includes('#') ? `${ip} [${API备注名}]` : `${ip}#[${API备注名}]`;
+              results.add(处理后IP);
+              if (优选IP作为反代IP) 反代IP池.add(ip.split('#')[0]);
+            }
           } else {
-            results.add(ipItem);
+            for (const ip of 优选IP) {
+              results.add(ip);
+              if (优选IP作为反代IP) 反代IP池.add(ip.split('#')[0]);
+            }
           }
-          if (优选IP作为反代IP) 反代IP池.add(ipItem.split('#')[0]);
-        });
-      } else {
-        const headers = lines[0].split(',').map(h => h.trim());
-        const dataLines = lines.slice(1);
-        if (headers.includes('IP地址') && headers.includes('端口') && headers.includes('数据中心')) {
-          const ipIdx = headers.indexOf('IP地址'), portIdx = headers.indexOf('端口');
-          const remarkIdx = headers.indexOf('国家') > -1 ? headers.indexOf('国家') :
-            headers.indexOf('城市') > -1 ? headers.indexOf('城市') : headers.indexOf('数据中心');
-          const tlsIdx = headers.indexOf('TLS');
-          dataLines.forEach(line => {
-            const cols = line.split(',').map(c => c.trim());
-            if (tlsIdx !== -1 && cols[tlsIdx]?.toLowerCase() !== 'true') return;
-            const wrappedIP = IPV6_PATTERN.test(cols[ipIdx]) ? `[${cols[ipIdx]}]` : cols[ipIdx];
-            const ipItem = `${wrappedIP}:${cols[portIdx]}#${cols[remarkIdx]}`;
-            // 处理第一个数组 - 优选IP
-            if (API备注名) {
-              const 处理后IP = `${ipItem} [${API备注名}]`;
-              results.add(处理后IP);
-            } else {
-              results.add(ipItem);
-            }
-            if (优选IP作为反代IP) 反代IP池.add(`${wrappedIP}:${cols[portIdx]}`);
-          });
-        } else if (headers.some(h => h.includes('IP')) && headers.some(h => h.includes('延迟')) && headers.some(h => h.includes('下载速度'))) {
-          const ipIdx = headers.findIndex(h => h.includes('IP'));
-          const delayIdx = headers.findIndex(h => h.includes('延迟'));
-          const speedIdx = headers.findIndex(h => h.includes('下载速度'));
-          const port = parsedUrl.searchParams.get('port') || 默认端口;
-          dataLines.forEach(line => {
-            const cols = line.split(',').map(c => c.trim());
-            const wrappedIP = IPV6_PATTERN.test(cols[ipIdx]) ? `[${cols[ipIdx]}]` : cols[ipIdx];
-            const ipItem = `${wrappedIP}:${port}#CF优选 ${cols[delayIdx]}ms ${cols[speedIdx]}MB/s`;
-            // 处理第一个数组 - 优选IP
-            if (API备注名) {
-              const 处理后IP = `${ipItem} [${API备注名}]`;
-              results.add(处理后IP);
-            } else {
-              results.add(ipItem);
-            }
-            if (优选IP作为反代IP) 反代IP池.add(`${wrappedIP}:${port}`);
-          });
-        }
+          // 处理第二个数组 - 其他节点LINK
+          if (其他节点LINK && typeof 其他节点LINK === 'string' && API备注名) {
+            const 处理后LINK内容 = 其他节点LINK.replace(
+              /([a-z][a-z0-9+\-.]*:\/\/[^\r\n]*?)(\r?\n|$)/gi,
+              (match, link, lineEnd) => {
+                const 完整链接 = link.includes('#')
+                  ? `${link}${encodeURIComponent(` [${API备注名}]`)}`
+                  : `${link}${encodeURIComponent(`#[${API备注名}]`)}`;
+                return `${完整链接}${lineEnd}`;
+              },
+            );
+            订阅链接响应的明文LINK内容 += 处理后LINK内容;
+          } else if (其他节点LINK && typeof 其他节点LINK === 'string') {
+            订阅链接响应的明文LINK内容 += 其他节点LINK;
+          }
+        } catch (e) {}
+        return;
       }
-    } catch (e) { }
-  }));
+
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 超时时间);
+        const response = await fetch(urlWithoutHash, {
+          signal: controller.signal,
+          headers: { 'User-Agent': 汇聚订阅_UA },
+        });
+        clearTimeout(timeoutId);
+        let text = '';
+        try {
+          const buffer = await response.arrayBuffer();
+          const contentType = (response.headers.get('content-type') || '').toLowerCase();
+          const charset = contentType.match(/charset=([^\s;]+)/i)?.[1]?.toLowerCase() || '';
+
+          // 根据 Content-Type 响应头判断编码优先级
+          let decoders = ['utf-8', 'gb2312']; // 默认优先 UTF-8
+          if (charset.includes('gb') || charset.includes('gbk') || charset.includes('gb2312')) {
+            decoders = ['gb2312', 'utf-8']; // 如果明确指定 GB 系编码，优先尝试 GB2312
+          }
+
+          // 尝试多种编码解码
+          let decodeSuccess = false;
+          for (const decoder of decoders) {
+            try {
+              const decoded = new TextDecoder(decoder).decode(buffer);
+              // 验证解码结果的有效性
+              if (decoded && decoded.length > 0 && !decoded.includes('\ufffd')) {
+                text = decoded;
+                decodeSuccess = true;
+                break;
+              } else if (decoded && decoded.length > 0) {
+                // 如果有替换字符 (U+FFFD)，说明编码不匹配，继续尝试下一个编码
+                continue;
+              }
+            } catch (e) {
+              // 该编码解码失败，尝试下一个
+              continue;
+            }
+          }
+
+          // 如果所有编码都失败或无效，尝试 response.text()
+          if (!decodeSuccess) {
+            text = await response.text();
+          }
+
+          // 如果返回的是空或无效数据，返回
+          if (!text || text.trim().length === 0) {
+            return;
+          }
+        } catch (e) {
+          console.error('Failed to decode response:', e);
+          return;
+        }
+
+        // 预处理订阅内容
+        /*
+			if (text.includes('proxies:') || (text.includes('outbounds"') && text.includes('inbounds"'))) {// Clash Singbox 配置
+				需要订阅转换订阅URLs.add(url);
+				return;
+			}
+			*/
+
+        let 预处理订阅明文内容 = text;
+        const cleanText = typeof text === 'string' ? text.replace(/\s/g, '') : '';
+        if (cleanText.length > 0 && cleanText.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(cleanText)) {
+          try {
+            const bytes = new Uint8Array(
+              atob(cleanText)
+                .split('')
+                .map((c) => c.charCodeAt(0)),
+            );
+            预处理订阅明文内容 = new TextDecoder('utf-8').decode(bytes);
+          } catch {}
+        }
+        if (预处理订阅明文内容.split('#')[0].includes('://')) {
+          // 处理LINK内容
+          if (API备注名) {
+            const 处理后LINK内容 = 预处理订阅明文内容.replace(
+              /([a-z][a-z0-9+\-.]*:\/\/[^\r\n]*?)(\r?\n|$)/gi,
+              (match, link, lineEnd) => {
+                const 完整链接 = link.includes('#')
+                  ? `${link}${encodeURIComponent(` [${API备注名}]`)}`
+                  : `${link}${encodeURIComponent(`#[${API备注名}]`)}`;
+                return `${完整链接}${lineEnd}`;
+              },
+            );
+            订阅链接响应的明文LINK内容 += 处理后LINK内容 + '\n';
+          } else {
+            订阅链接响应的明文LINK内容 += 预处理订阅明文内容 + '\n';
+          }
+          return;
+        }
+
+        const lines = text
+          .trim()
+          .split('\n')
+          .map((l) => l.trim())
+          .filter((l) => l);
+        const isCSV = lines.length > 1 && lines[0].includes(',');
+        const IPV6_PATTERN = /^[^\[\]]*:[^\[\]]*:[^\[\]]/;
+        const parsedUrl = new URL(urlWithoutHash);
+        if (!isCSV) {
+          lines.forEach((line) => {
+            const lineHashIndex = line.indexOf('#');
+            const [hostPart, remark] =
+              lineHashIndex > -1 ? [line.substring(0, lineHashIndex), line.substring(lineHashIndex)] : [line, ''];
+            let hasPort = false;
+            if (hostPart.startsWith('[')) {
+              hasPort = /\]:(\d+)$/.test(hostPart);
+            } else {
+              const colonIndex = hostPart.lastIndexOf(':');
+              hasPort = colonIndex > -1 && /^\d+$/.test(hostPart.substring(colonIndex + 1));
+            }
+            const port = parsedUrl.searchParams.get('port') || 默认端口;
+            const ipItem = hasPort ? line : `${hostPart}:${port}${remark}`;
+            // 处理第一个数组 - 优选IP
+            if (API备注名) {
+              const 处理后IP = ipItem.includes('#') ? `${ipItem} [${API备注名}]` : `${ipItem}#[${API备注名}]`;
+              results.add(处理后IP);
+            } else {
+              results.add(ipItem);
+            }
+            if (优选IP作为反代IP) 反代IP池.add(ipItem.split('#')[0]);
+          });
+        } else {
+          const headers = lines[0].split(',').map((h) => h.trim());
+          const dataLines = lines.slice(1);
+          if (headers.includes('IP地址') && headers.includes('端口') && headers.includes('数据中心')) {
+            const ipIdx = headers.indexOf('IP地址'),
+              portIdx = headers.indexOf('端口');
+            const remarkIdx =
+              headers.indexOf('国家') > -1
+                ? headers.indexOf('国家')
+                : headers.indexOf('城市') > -1
+                  ? headers.indexOf('城市')
+                  : headers.indexOf('数据中心');
+            const tlsIdx = headers.indexOf('TLS');
+            dataLines.forEach((line) => {
+              const cols = line.split(',').map((c) => c.trim());
+              if (tlsIdx !== -1 && cols[tlsIdx]?.toLowerCase() !== 'true') return;
+              const wrappedIP = IPV6_PATTERN.test(cols[ipIdx]) ? `[${cols[ipIdx]}]` : cols[ipIdx];
+              const ipItem = `${wrappedIP}:${cols[portIdx]}#${cols[remarkIdx]}`;
+              // 处理第一个数组 - 优选IP
+              if (API备注名) {
+                const 处理后IP = `${ipItem} [${API备注名}]`;
+                results.add(处理后IP);
+              } else {
+                results.add(ipItem);
+              }
+              if (优选IP作为反代IP) 反代IP池.add(`${wrappedIP}:${cols[portIdx]}`);
+            });
+          } else if (
+            headers.some((h) => h.includes('IP')) &&
+            headers.some((h) => h.includes('延迟')) &&
+            headers.some((h) => h.includes('下载速度'))
+          ) {
+            const ipIdx = headers.findIndex((h) => h.includes('IP'));
+            const delayIdx = headers.findIndex((h) => h.includes('延迟'));
+            const speedIdx = headers.findIndex((h) => h.includes('下载速度'));
+            const port = parsedUrl.searchParams.get('port') || 默认端口;
+            dataLines.forEach((line) => {
+              const cols = line.split(',').map((c) => c.trim());
+              const wrappedIP = IPV6_PATTERN.test(cols[ipIdx]) ? `[${cols[ipIdx]}]` : cols[ipIdx];
+              const ipItem = `${wrappedIP}:${port}#CF优选 ${cols[delayIdx]}ms ${cols[speedIdx]}MB/s`;
+              // 处理第一个数组 - 优选IP
+              if (API备注名) {
+                const 处理后IP = `${ipItem} [${API备注名}]`;
+                results.add(处理后IP);
+              } else {
+                results.add(ipItem);
+              }
+              if (优选IP作为反代IP) 反代IP池.add(`${wrappedIP}:${port}`);
+            });
+          }
+        }
+      } catch (e) {}
+    }),
+  );
   // 将LINK内容转换为数组并去重
-  const LINK数组 = 订阅链接响应的明文LINK内容.trim() ? [...new Set(订阅链接响应的明文LINK内容.split(/\r?\n/).filter(line => line.trim() !== ''))] : [];
+  const LINK数组 = 订阅链接响应的明文LINK内容.trim()
+    ? [...new Set(订阅链接响应的明文LINK内容.split(/\r?\n/).filter((line) => line.trim() !== ''))]
+    : [];
   return [Array.from(results), LINK数组, 需要订阅转换订阅URLs, Array.from(反代IP池)];
 }

@@ -1,9 +1,5 @@
-/**
- * 返回 Nginx 欢迎页 HTML
- * @returns {Promise<string>}
- */
 export async function nginx() {
-	return `
+  return `
 	<!DOCTYPE html>
 	<html>
 	<head>
@@ -29,21 +25,28 @@ export async function nginx() {
 	<p><em>Thank you for using nginx.</em></p>
 	</body>
 	</html>
-	`
+	`;
 }
 
-/**
- * 返回 Cloudflare 1101 错误页 HTML
- * @param {string} host
- * @param {string} 访问IP
- * @returns {Promise<string>}
- */
 export async function html1101(host, 访问IP) {
-	const now = new Date();
-	const 格式化时间戳 = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0') + ' ' + String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0') + ':' + String(now.getSeconds()).padStart(2, '0');
-	const 随机字符串 = Array.from(crypto.getRandomValues(new Uint8Array(8))).map(b => b.toString(16).padStart(2, '0')).join('');
+  const now = new Date();
+  const 格式化时间戳 =
+    now.getFullYear() +
+    '-' +
+    String(now.getMonth() + 1).padStart(2, '0') +
+    '-' +
+    String(now.getDate()).padStart(2, '0') +
+    ' ' +
+    String(now.getHours()).padStart(2, '0') +
+    ':' +
+    String(now.getMinutes()).padStart(2, '0') +
+    ':' +
+    String(now.getSeconds()).padStart(2, '0');
+  const 随机字符串 = Array.from(crypto.getRandomValues(new Uint8Array(8)))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
 
-	return `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <!--[if lt IE 7]> <html class="no-js ie6 oldie" lang="en-US"> <![endif]-->
 <!--[if IE 7]>    <html class="no-js ie7 oldie" lang="en-US"> <![endif]-->
 <!--[if IE 8]>    <html class="no-js ie8 oldie" lang="en-US"> <![endif]-->
@@ -58,7 +61,6 @@ export async function html1101(host, 访问IP) {
 <link rel="stylesheet" id="cf_styles-css" href="/cdn-cgi/styles/cf.errors.css" />
 <!--[if lt IE 9]><link rel="stylesheet" id='cf_styles-ie-css' href="/cdn-cgi/styles/cf.errors.ie.css" /><![endif]-->
 <style>body{margin:0;padding:0}</style>
-
 
 <!--[if gte IE 10]><!-->
 <script>
@@ -123,7 +125,6 @@ export async function html1101(host, 访问IP) {
 
      <script>
     window._cf_translation = {};
-
 
   </script>
 </body>

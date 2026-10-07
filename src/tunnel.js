@@ -1,331 +1,392 @@
-/**
- * TCP/UDP forwarding and stream management.
- *
- * Handles direct connections, proxy fallback, connection retries,
- * speed-test blocking, and bidirectional WebSocket-to-TCP stream piping
- * with BYOB read optimization.
- */
+import { 创建日志器 } from './utils/log.js';
+import { 创建请求TCP连接器 } from './tcp-connect.js';
+import { 提取木马反代握手数据, 连接木马反代 } from './trojan-fallback.js';
+import { closeSocketQuietly } from './utils/socket.js';
+import { connectStreams } from './streams/bridge.js';
+import { withTimeout, isIPv4 } from './turn-protocol.js';
+import { 有效数据长度, 数据转Uint8Array } from './utils/bytes.js';
+import { isIPHostname } from './utils/address.js';
+import { DoH查询, 解析地址端口 } from './dns.js';
+import { 开始TCP连接世代 } from './connection.js';
+import { socks5Connect, httpConnect, httpsConnect } from './proxy-connect.js';
+import { turnConnect } from './proxy-turn.js';
+import { sstpConnect } from './proxy-sstp.js';
+import { 特征码字典 } from './state.js';
+export async function forwardataTCP(
+  host,
+  portNum,
+  rawData,
+  ws,
+  respHeader,
+  remoteConnWrapper,
+  yourUUID,
+  request = null,
+  反代上下文 = {},
+  允许木马反代 = false,
+  木马反代首包数据 = null,
+  仅建立连接 = false,
+) {
+  const {
+    TCP并发拨号数 = 2,
+    反代并发拨号数 = 1,
+    预加载竞速拨号 = false,
+    SOCKS5白名单 = [],
+    调试日志打印 = false,
+  } = 反代上下文;
+  const log = 创建日志器(调试日志打印);
+  const ctx反代IP = 反代上下文.反代IP || '';
+  const ctx代理类型 = 反代上下文.代理类型 !== undefined ? 反代上下文.代理类型 : null;
+  const ctx代理全局 = 反代上下文.代理全局 !== undefined ? 反代上下文.代理全局 : false;
+  const ctx代理参数 = 反代上下文.代理参数 || {};
+  const ctx反代兜底 = 反代上下文.反代兜底 !== undefined ? 反代上下文.反代兜底 : true;
+  let 反代数组索引 = 0;
+  log(
+    `[TCP转发] 目标: ${host}:${portNum} | 反代IP: ${ctx反代IP} | 反代兜底: ${ctx反代兜底 ? '是' : '否'} | 反代类型: ${ctx代理类型 || 'proxyip'} | 全局: ${ctx代理全局 ? '是' : '否'}`,
+  );
+  const 连接超时毫秒 = 1000;
+  let 已通过代理发送首包 = false;
+  const TCP连接 = 创建请求TCP连接器(request);
+  const 使用木马反代 = 允许木马反代 && (反代上下文.木马反代地址 || null);
+  const 木马反代目标 = 使用木马反代 ? 反代上下文.木马反代地址 : null;
+  const 木马反代握手数据 = 使用木马反代 ? 提取木马反代握手数据(木马反代首包数据, rawData) : null;
+  let 待发送响应头 = respHeader;
+  const 取出响应头 = () => {
+    const header = 待发送响应头;
+    待发送响应头 = null;
+    return header;
+  };
+  if (!Number.isInteger(remoteConnWrapper.generation)) remoteConnWrapper.generation = 0;
 
-import { connect } from 'cloudflare:sockets';
-import { state } from './state.js';
-import { log } from './utils/log.js';
-import { socks5Connect, httpConnect } from './proxy.js';
-import { 解析地址端口 } from './dns.js';
-import { 整理成数组 } from './utils/format.js';
+  const 安装当前连接 = async (socket, generation, downlinkDrain, retryFunc = null) => {
+    try {
+      await downlinkDrain;
+    } catch (e) {
+      if (remoteConnWrapper.downlinkDrain === downlinkDrain) remoteConnWrapper.downlinkDrain = Promise.resolve();
+      try {
+        socket?.close?.();
+      } catch (_) {}
+      if (remoteConnWrapper.generation === generation) closeSocketQuietly(ws);
+      throw e;
+    }
+    if (remoteConnWrapper.downlinkDrain === downlinkDrain) remoteConnWrapper.downlinkDrain = Promise.resolve();
+    const 连接仍有效 = () => remoteConnWrapper.generation === generation && remoteConnWrapper.socket === socket;
+    if (remoteConnWrapper.generation !== generation || ws.readyState !== WebSocket.OPEN) {
+      try {
+        socket?.close?.();
+      } catch (e) {}
+      if (remoteConnWrapper.generation === generation) remoteConnWrapper.socket = null;
+      throw new Error('connection superseded or client closed');
+    }
+    remoteConnWrapper.socket = socket;
+    if (仅建立连接) return socket;
+    connectStreams(socket, ws, 取出响应头, retryFunc, 连接仍有效, remoteConnWrapper).catch((err) => {
+      if (!连接仍有效()) return;
+      log(`[TCP下行] 处理失败: ${err?.message || err}`);
+      try {
+        socket?.close?.();
+      } catch (e) {}
+      closeSocketQuietly(ws);
+    });
+    return true;
+  };
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+  async function 等待连接建立(remoteSock, timeoutMs = 连接超时毫秒) {
+    await withTimeout(remoteSock.opened, timeoutMs, '连接超时');
+  }
 
-/**
- * Return the byte-length of `data`, or 0 if data is falsy.
- */
-function 有效数据长度(data) {
-	if (!data) return 0;
-	if (typeof data.byteLength === 'number') return data.byteLength;
-	if (typeof data.length === 'number') return data.length;
-	return 0;
-}
+  async function 打开TCP连接(address, port) {
+    const remoteSock = TCP连接({ hostname: address, port });
+    try {
+      await 等待连接建立(remoteSock);
+      return remoteSock;
+    } catch (err) {
+      try {
+        remoteSock?.close?.();
+      } catch (e) {}
+      throw err;
+    }
+  }
 
-/**
- * Check whether `hostname` is a known speed-test domain that should be
- * blocked from proxying.
- */
-export function isSpeedTestSite(hostname) {
-	const speedTestDomains = [atob('c3BlZWQuY2xvdWRmbGFyZS5jb20=')];
-	if (speedTestDomains.includes(hostname)) {
-		return true;
-	}
+  async function 写入首包(remoteSock, data) {
+    if (有效数据长度(data) <= 0) return;
+    const writer = remoteSock.writable.getWriter();
+    try {
+      await writer.write(数据转Uint8Array(data));
+    } finally {
+      try {
+        writer.releaseLock();
+      } catch (e) {}
+    }
+  }
 
-	for (const domain of speedTestDomains) {
-		if (hostname.endsWith('.' + domain) || hostname === domain) {
-			return true;
-		}
-	}
-	return false;
-}
+  async function 并发打开候选连接(候选列表) {
+    if (候选列表.length === 1) {
+      const 候选 = 候选列表[0];
+      return { socket: await 打开TCP连接(候选.hostname, 候选.port), candidate: 候选 };
+    }
+    const attempts = 候选列表.map((候选) =>
+      打开TCP连接(候选.hostname, 候选.port).then((socket) => ({ socket, candidate: 候选 })),
+    );
+    let winner = null;
+    try {
+      winner = await Promise.any(attempts);
+      return winner;
+    } finally {
+      if (winner) {
+        for (const attempt of attempts) {
+          attempt
+            .then(({ socket }) => {
+              if (socket !== winner.socket) {
+                try {
+                  socket?.close?.();
+                } catch (e) {}
+              }
+            })
+            .catch(() => {});
+        }
+      }
+    }
+  }
 
-// ---------------------------------------------------------------------------
-// Socket / WebSocket utilities
-// ---------------------------------------------------------------------------
+  async function 构建预加载竞速候选列表(address, port) {
+    if (!预加载竞速拨号 || isIPHostname(address)) return null;
+    log(`[TCP直连] 预加载竞速拨号开启，开始并发查询 ${address} 的 A/AAAA 记录`);
+    const [aRecords, aaaaRecords] = await Promise.all([DoH查询(address, 'A'), DoH查询(address, 'AAAA')]);
+    const ipv4List = [
+      ...new Set(
+        aRecords.flatMap((r) => {
+          const data = r.data;
+          return r.type === 1 && typeof data === 'string' && isIPv4(data) ? [data] : [];
+        }),
+      ),
+    ];
+    const ipv6List = [
+      ...new Set(
+        aaaaRecords.flatMap((r) => {
+          const data = r.data;
+          return r.type === 28 && typeof data === 'string' && isIPHostname(data) ? [data] : [];
+        }),
+      ),
+    ];
+    const 拨号上限 = Math.max(1, TCP并发拨号数 | 0);
+    const ipList =
+      ipv4List.length >= 拨号上限
+        ? ipv4List.slice(0, 拨号上限)
+        : ipv4List.concat(ipv6List.slice(0, 拨号上限 - ipv4List.length));
+    const 使用记录类型 = ipv4List.length > 0 ? (ipList.length > ipv4List.length ? 'A+AAAA' : 'A') : 'AAAA';
+    if (ipList.length === 0) {
+      log(`[TCP直连] ${address} 的 A/AAAA 未获得可用解析结果，预加载竞速不可用，回退到原始 hostname 直连。`);
+      return null;
+    }
+    const 选中IP列表 = ipList;
+    log(
+      `[TCP直连] ${address} A记录:${ipv4List.length} AAAA记录:${ipv6List.length}，使用${使用记录类型}记录，竞速拨号 ${选中IP列表.length}/${拨号上限}: ${选中IP列表.join(', ')}`,
+    );
+    return 选中IP列表.map((hostname, attempt) => ({ hostname, port, attempt, resolvedFrom: address }));
+  }
 
-/**
- * Safely close a WebSocket without throwing.
- */
-export function closeSocketQuietly(socket) {
-	try {
-		if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CLOSING) {
-			socket.close();
-		}
-	} catch (error) { }
-}
+  async function connectDirect(address, port, data = null, 启用预加载 = false) {
+    const 预加载候选列表 = 启用预加载 ? await 构建预加载竞速候选列表(address, port) : null;
+    const 候选列表 =
+      预加载候选列表 || Array.from({ length: TCP并发拨号数 }, (_, attempt) => ({ hostname: address, port, attempt }));
+    log(
+      预加载候选列表
+        ? `[TCP直连] 并发尝试 ${候选列表.length} 路: ${候选列表.map((候选) => `${候选.hostname}:${候选.port}`).join(', ')}`
+        : `[TCP直连] 并发尝试 ${候选列表.length} 路: ${address}:${port}`,
+    );
+    let socket = null;
+    try {
+      const 连接结果 = await 并发打开候选连接(候选列表);
+      socket = 连接结果.socket;
+      if (预加载候选列表) {
+        const winner = 连接结果.candidate;
+        log(
+          `[TCP直连] 预加载竞速结果: ${winner.hostname}:${winner.port} 胜出，源域名: ${winner.resolvedFrom || address}`,
+        );
+      }
+      await 写入首包(socket, data);
+      return socket;
+    } catch (err) {
+      try {
+        socket?.close?.();
+      } catch (e) {}
+      if (预加载候选列表) log(`[TCP直连] 预加载竞速失败: ${err.message || err}`);
+      throw err;
+    }
+  }
 
-/**
- * Send `payload` over a WebSocket, awaiting the result if the
- * implementation returns a thenable.
- */
-export async function WebSocket发送并等待(webSocket, payload) {
-	const sendResult = webSocket.send(payload);
-	if (sendResult && typeof sendResult.then === 'function') await sendResult;
-}
+  async function connectProxyIP(address, port, data = null, 所有反代数组 = null, 启用反代失败兜底 = true) {
+    if (所有反代数组 && 所有反代数组.length > 0) {
+      const 实际并发数 = Math.max(1, Math.floor(Number(反代并发拨号数) || 1));
+      for (let i = 0; i < 所有反代数组.length; i += 实际并发数) {
+        const 候选列表 = [];
+        for (let j = 0; j < 实际并发数 && i + j < 所有反代数组.length; j++) {
+          const 索引 = (反代数组索引 + i + j) % 所有反代数组.length;
+          const [反代地址, 反代端口] = 所有反代数组[索引];
+          候选列表.push({ hostname: 反代地址, port: 反代端口, index: 索引 });
+        }
+        let socket = null,
+          candidate = null;
+        try {
+          log(
+            `[反代连接] 并发尝试 ${候选列表.length} 路: ${候选列表.map((候选) => `${候选.hostname}:${候选.port}`).join(', ')}`,
+          );
+          const 连接结果 = await 并发打开候选连接(候选列表);
+          socket = 连接结果.socket;
+          candidate = 连接结果.candidate;
+          await 写入首包(socket, data);
+          log(`[反代连接] 成功连接到: ${candidate.hostname}:${candidate.port} (索引: ${candidate.index})`);
+          反代数组索引 = candidate.index;
+          return socket;
+        } catch (err) {
+          try {
+            socket?.close?.();
+          } catch (e) {}
+          log(`[反代连接] 本批连接失败: ${err.message || err}`);
+        }
+      }
+    }
 
-// ---------------------------------------------------------------------------
-// Bidirectional stream piping
-// ---------------------------------------------------------------------------
+    if (启用反代失败兜底) return connectDirect(address, port, data, false);
+    else {
+      throw new Error('[反代连接] 所有反代连接失败，且未启用反代兜底，连接终止。');
+    }
+  }
 
-/**
- * Pipe data from `remoteSocket.readable` into `webSocket`, prepending
- * `headerData` to the first chunk.  Uses BYOB reads when supported for
- * better throughput.  If no data was received and `retryFunc` is provided
- * it will be called (used for proxy fallback).
- */
-export async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
-	let header = headerData, hasData = false, reader, useBYOB = false;
-	const BYOB缓冲区大小 = 512 * 1024, BYOB单次读取上限 = 64 * 1024, BYOB高吞吐阈值 = 50 * 1024 * 1024;
-	const BYOB慢速刷新间隔 = 20, BYOB快速刷新间隔 = 2, BYOB安全阈值 = BYOB缓冲区大小 - BYOB单次读取上限;
+  async function connecttoPry(允许发送首包 = true) {
+    if (remoteConnWrapper.connectingPromise) {
+      await remoteConnWrapper.connectingPromise;
+      return;
+    }
+    const { generation: 当前连接世代, downlinkDrain } = 开始TCP连接世代(remoteConnWrapper);
 
-	const 发送块 = async (chunk) => {
-		if (webSocket.readyState !== WebSocket.OPEN) throw new Error('ws.readyState is not open');
-		if (header) {
-			const merged = new Uint8Array(header.length + chunk.byteLength);
-			merged.set(header, 0); merged.set(chunk, header.length);
-			await WebSocket发送并等待(webSocket, merged.buffer);
-			header = null;
-		} else await WebSocket发送并等待(webSocket, chunk);
-	};
+    let 本次发送首包 = false,
+      本次首包数据 = null;
+    if (使用木马反代) {
+      if (允许发送首包 && !已通过代理发送首包 && 有效数据长度(木马反代首包数据) > 0) {
+        本次首包数据 = 木马反代首包数据;
+        本次发送首包 = 有效数据长度(rawData) > 0;
+      } else {
+        本次首包数据 = 木马反代握手数据;
+      }
+    } else {
+      本次发送首包 = 允许发送首包 && !已通过代理发送首包 && 有效数据长度(rawData) > 0;
+      本次首包数据 = 本次发送首包 ? rawData : null;
+    }
 
-	try { reader = remoteSocket.readable.getReader({ mode: 'byob' }); useBYOB = true }
-	catch (e) { reader = remoteSocket.readable.getReader() }
+    const 当前连接任务 = (async () => {
+      let newSocket = null;
+      try {
+        if (使用木马反代) {
+          log(`[木马反代] 代理到: ${host}:${portNum}`);
+          newSocket = await 连接木马反代(本次首包数据, TCP连接, 木马反代目标);
+        } else if (ctx代理类型 === 'socks5') {
+          log(`[SOCKS5代理] 代理到: ${host}:${portNum}`);
+          newSocket = await socks5Connect(host, portNum, 本次首包数据, TCP连接, ctx代理参数);
+        } else if (ctx代理类型 === 'http') {
+          log(`[HTTP代理] 代理到: ${host}:${portNum}`);
+          newSocket = await httpConnect(host, portNum, 本次首包数据, false, TCP连接, ctx代理参数);
+        } else if (ctx代理类型 === 'https') {
+          log(`[HTTPS代理] 代理到: ${host}:${portNum}`);
+          newSocket = isIPHostname(ctx代理参数.hostname)
+            ? await httpsConnect(host, portNum, 本次首包数据, TCP连接, ctx代理参数)
+            : await httpConnect(host, portNum, 本次首包数据, true, TCP连接, ctx代理参数);
+        } else if (ctx代理类型 === 'turn') {
+          log(`[TURN代理] 代理到: ${host}:${portNum}`);
+          newSocket = await turnConnect(ctx代理参数, host, portNum, TCP连接);
+          if (有效数据长度(本次首包数据) > 0) {
+            const writer = newSocket.writable.getWriter();
+            try {
+              await writer.write(数据转Uint8Array(本次首包数据));
+            } finally {
+              try {
+                writer.releaseLock();
+              } catch (e) {}
+            }
+          }
+        } else if (ctx代理类型 === 'sstp') {
+          log(`[SSTP代理] 代理到: ${host}:${portNum}`);
+          newSocket = await sstpConnect(ctx代理参数, host, portNum, TCP连接);
+          if (有效数据长度(本次首包数据) > 0) {
+            const writer = newSocket.writable.getWriter();
+            try {
+              await writer.write(数据转Uint8Array(本次首包数据));
+            } finally {
+              try {
+                writer.releaseLock();
+              } catch (e) {}
+            }
+          }
+        } else {
+          log(`[反代连接] 代理到: ${host}:${portNum}`);
+          const 所有反代数组 = await 解析地址端口(ctx反代IP, host, yourUUID);
+          newSocket = await connectProxyIP(
+            `${特征码字典[0]}.tp1.${特征码字典[2]}.xyz`,
+            1,
+            本次首包数据,
+            所有反代数组,
+            ctx反代兜底,
+          );
+        }
+        await 安装当前连接(newSocket, 当前连接世代, downlinkDrain);
+        if (本次发送首包) 已通过代理发送首包 = true;
+      } catch (err) {
+        try {
+          newSocket?.close?.();
+        } catch (e) {}
+        if (remoteConnWrapper.generation === 当前连接世代) {
+          remoteConnWrapper.socket = null;
+          closeSocketQuietly(ws);
+          throw err;
+        }
+      }
+    })();
 
-	try {
-		if (!useBYOB) {
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				if (!value || value.byteLength === 0) continue;
-				hasData = true;
-				await 发送块(value instanceof Uint8Array ? value : new Uint8Array(value));
-			}
-		} else {
-			let mainBuf = new ArrayBuffer(BYOB缓冲区大小), offset = 0, totalBytes = 0;
-			let flush间隔毫秒 = BYOB快速刷新间隔, flush定时器 = null, 等待刷新恢复 = null;
-			let 正在读取 = false, 读取中待刷新 = false;
+    remoteConnWrapper.connectingPromise = 当前连接任务;
+    try {
+      await 当前连接任务;
+    } finally {
+      if (remoteConnWrapper.connectingPromise === 当前连接任务) {
+        remoteConnWrapper.connectingPromise = null;
+      }
+    }
+  }
+  remoteConnWrapper.retryConnect = async () => connecttoPry(!已通过代理发送首包);
 
-			const flush = async () => {
-				if (正在读取) { 读取中待刷新 = true; return }
-				try {
-					if (offset > 0) { const p = new Uint8Array(mainBuf.slice(0, offset)); offset = 0; await 发送块(p) }
-				} finally {
-					读取中待刷新 = false;
-					if (flush定时器) { clearTimeout(flush定时器); flush定时器 = null }
-					if (等待刷新恢复) { const r = 等待刷新恢复; 等待刷新恢复 = null; r() }
-				}
-			};
-
-			while (true) {
-				正在读取 = true;
-				const { done, value } = await reader.read(new Uint8Array(mainBuf, offset, BYOB单次读取上限));
-				正在读取 = false;
-				if (done) break;
-				if (!value || value.byteLength === 0) { if (读取中待刷新) await flush(); continue }
-				hasData = true;
-				mainBuf = value.buffer;
-				const len = value.byteLength;
-
-				if (value.byteOffset !== offset) {
-					log(`[BYOB] 偏移异常: 预期=${offset}, 实际=${value.byteOffset}`);
-					await 发送块(new Uint8Array(value.buffer, value.byteOffset, len).slice());
-					mainBuf = new ArrayBuffer(BYOB缓冲区大小); offset = 0; totalBytes = 0;
-					continue;
-				}
-
-				if (len < BYOB单次读取上限) {
-					flush间隔毫秒 = BYOB快速刷新间隔;
-					if (len < 4096) totalBytes = 0;
-					if (offset > 0) { offset += len; await flush() }
-					else await 发送块(value.slice());
-				} else {
-					totalBytes += len; offset += len;
-					if (!flush定时器) flush定时器 = setTimeout(() => { flush().catch(() => closeSocketQuietly(webSocket)) }, flush间隔毫秒);
-					if (读取中待刷新) await flush();
-					if (offset > BYOB安全阈值) {
-						if (totalBytes > BYOB高吞吐阈值) flush间隔毫秒 = BYOB慢速刷新间隔;
-						await new Promise(r => { 等待刷新恢复 = r });
-					}
-				}
-			}
-			正在读取 = false;
-			await flush();
-			if (flush定时器) { clearTimeout(flush定时器); flush定时器 = null }
-		}
-	} catch (err) { closeSocketQuietly(webSocket) }
-	finally { try { reader.cancel() } catch (e) { } try { reader.releaseLock() } catch (e) { } }
-	if (!hasData && retryFunc) await retryFunc();
-}
-
-// ---------------------------------------------------------------------------
-// TCP forwarding
-// ---------------------------------------------------------------------------
-
-/**
- * Main TCP forwarding function.
- *
- * Handles direct connections, SOCKS5/HTTP/HTTPS proxy, proxy-IP round-robin
- * fallback, connection retries, and speed-test domain blocking.
- */
-export async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnWrapper, yourUUID) {
-	const { 反代IP, 启用反代兜底, 启用SOCKS5反代, 启用SOCKS5全局反代, SOCKS5白名单 } = state;
-	log(`[TCP转发] 目标: ${host}:${portNum} | 反代IP: ${反代IP} | 反代兜底: ${启用反代兜底 ? '是' : '否'} | 反代类型: ${启用SOCKS5反代 || 'proxyip'} | 全局: ${启用SOCKS5全局反代 ? '是' : '否'}`);
-	const 连接超时毫秒 = 1000;
-	let 已通过代理发送首包 = false;
-
-	async function 等待连接建立(remoteSock, timeoutMs = 连接超时毫秒) {
-		await Promise.race([
-			remoteSock.opened,
-			new Promise((_, reject) => setTimeout(() => reject(new Error('连接超时')), timeoutMs))
-		]);
-	}
-
-	async function connectDirect(address, port, data = null, 所有反代数组 = null, 反代兜底 = true) {
-		let remoteSock;
-		if (所有反代数组 && 所有反代数组.length > 0) {
-			for (let i = 0; i < 所有反代数组.length; i++) {
-				const 反代数组索引 = (state.缓存反代数组索引 + i) % 所有反代数组.length;
-				const [反代地址, 反代端口] = 所有反代数组[反代数组索引];
-				try {
-					log(`[反代连接] 尝试连接到: ${反代地址}:${反代端口} (索引: ${反代数组索引})`);
-					remoteSock = connect({ hostname: 反代地址, port: 反代端口 });
-					await 等待连接建立(remoteSock);
-					if (有效数据长度(data) > 0) {
-						const testWriter = remoteSock.writable.getWriter();
-						await testWriter.write(data);
-						testWriter.releaseLock();
-					}
-					log(`[反代连接] 成功连接到: ${反代地址}:${反代端口}`);
-					state.缓存反代数组索引 = 反代数组索引;
-					return remoteSock;
-				} catch (err) {
-					log(`[反代连接] 连接失败: ${反代地址}:${反代端口}, 错误: ${err.message}`);
-					try { remoteSock?.close?.() } catch (e) { }
-					continue;
-				}
-			}
-		}
-
-		if (反代兜底) {
-			remoteSock = connect({ hostname: address, port: port });
-			await 等待连接建立(remoteSock);
-			if (有效数据长度(data) > 0) {
-				const writer = remoteSock.writable.getWriter();
-				await writer.write(data);
-				writer.releaseLock();
-			}
-			return remoteSock;
-		} else {
-			closeSocketQuietly(ws);
-			throw new Error('[反代连接] 所有反代连接失败，且未启用反代兜底，连接终止。');
-		}
-	}
-
-	async function connecttoPry(允许发送首包 = true) {
-		if (remoteConnWrapper.connectingPromise) {
-			await remoteConnWrapper.connectingPromise;
-			return;
-		}
-
-		const 本次发送首包 = 允许发送首包 && !已通过代理发送首包 && 有效数据长度(rawData) > 0;
-		const 本次首包数据 = 本次发送首包 ? rawData : null;
-
-		const 当前连接任务 = (async () => {
-			let newSocket;
-			if (启用SOCKS5反代 === 'socks5') {
-				log(`[SOCKS5代理] 代理到: ${host}:${portNum}`);
-				newSocket = await socks5Connect(host, portNum, 本次首包数据, 有效数据长度);
-			} else if (启用SOCKS5反代 === 'http') {
-				log(`[HTTP代理] 代理到: ${host}:${portNum}`);
-				newSocket = await httpConnect(host, portNum, 本次首包数据, false, 有效数据长度);
-			} else if (启用SOCKS5反代 === 'https') {
-				log(`[HTTPS代理] 代理到: ${host}:${portNum}`);
-				newSocket = await httpConnect(host, portNum, 本次首包数据, true, 有效数据长度);
-			} else {
-				log(`[反代连接] 代理到: ${host}:${portNum}`);
-				const 所有反代数组 = await 解析地址端口(反代IP, host, yourUUID, 整理成数组);
-				newSocket = await connectDirect(atob('UFJPWFlJUC50cDEuMDkwMjI3Lnh5eg=='), 1, 本次首包数据, 所有反代数组, 启用反代兜底);
-			}
-			if (本次发送首包) 已通过代理发送首包 = true;
-			remoteConnWrapper.socket = newSocket;
-			newSocket.closed.catch(() => { }).finally(() => closeSocketQuietly(ws));
-			connectStreams(newSocket, ws, respHeader, null);
-		})();
-
-		remoteConnWrapper.connectingPromise = 当前连接任务;
-		try {
-			await 当前连接任务;
-		} finally {
-			if (remoteConnWrapper.connectingPromise === 当前连接任务) {
-				remoteConnWrapper.connectingPromise = null;
-			}
-		}
-	}
-	remoteConnWrapper.retryConnect = async () => connecttoPry(!已通过代理发送首包);
-
-	const 验证SOCKS5白名单 = (addr) => SOCKS5白名单.some(p => new RegExp(`^${p.replace(/\*/g, '.*')}$`, 'i').test(addr));
-	if (启用SOCKS5反代 && (启用SOCKS5全局反代 || 验证SOCKS5白名单(host))) {
-		log(`[TCP转发] 启用 SOCKS5/HTTP/HTTPS 全局代理`);
-		try {
-			await connecttoPry();
-		} catch (err) {
-			log(`[TCP转发] SOCKS5/HTTP/HTTPS 代理连接失败: ${err.message}`);
-			throw err;
-		}
-	} else {
-		try {
-			log(`[TCP转发] 尝试直连到: ${host}:${portNum}`);
-			const initialSocket = await connectDirect(host, portNum, rawData);
-			remoteConnWrapper.socket = initialSocket;
-			connectStreams(initialSocket, ws, respHeader, async () => {
-				if (remoteConnWrapper.socket !== initialSocket) return;
-				await connecttoPry();
-			});
-		} catch (err) {
-			log(`[TCP转发] 直连 ${host}:${portNum} 失败: ${err.message}`);
-			await connecttoPry();
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// UDP forwarding
-// ---------------------------------------------------------------------------
-
-/**
- * Forward a single UDP chunk (DNS query) by piping it through a TCP
- * connection to 8.8.4.4:53, then streaming the response back over the
- * WebSocket.
- */
-export async function forwardataudp(udpChunk, webSocket, respHeader) {
-	try {
-		const tcpSocket = connect({ hostname: '8.8.4.4', port: 53 });
-		let vlessHeader = respHeader;
-		const writer = tcpSocket.writable.getWriter();
-		await writer.write(udpChunk);
-		writer.releaseLock();
-		await tcpSocket.readable.pipeTo(new WritableStream({
-			async write(chunk) {
-				if (webSocket.readyState === WebSocket.OPEN) {
-					if (vlessHeader) {
-						const response = new Uint8Array(vlessHeader.length + chunk.byteLength);
-						response.set(vlessHeader, 0);
-						response.set(chunk, vlessHeader.length);
-						await WebSocket发送并等待(webSocket, response.buffer);
-						vlessHeader = null;
-					} else {
-						await WebSocket发送并等待(webSocket, chunk);
-					}
-				}
-			},
-		}));
-	} catch (error) {
-		// console.error('UDP forward error:', error);
-	}
+  if (
+    ctx代理类型 &&
+    (ctx代理全局 || SOCKS5白名单.some((p) => new RegExp(`^${p.replace(/\*/g, '.*')}$`, 'i').test(host)))
+  ) {
+    log(`[TCP转发] 启用 SOCKS5/HTTP/HTTPS/TURN/SSTP 全局代理`);
+    try {
+      await connecttoPry();
+      if (仅建立连接) return remoteConnWrapper.socket;
+    } catch (err) {
+      log(`[TCP转发] SOCKS5/HTTP/HTTPS/TURN/SSTP 代理连接失败: ${err.message}`);
+      throw err;
+    }
+  } else {
+    let 直连世代 = remoteConnWrapper.generation;
+    try {
+      log(`[TCP转发] 尝试直连到: ${host}:${portNum}`);
+      const 世代连接 = 开始TCP连接世代(remoteConnWrapper);
+      直连世代 = 世代连接.generation;
+      const initialSocket = await connectDirect(host, portNum, rawData, true);
+      await 安装当前连接(initialSocket, 直连世代, 世代连接.downlinkDrain, async () => {
+        if (remoteConnWrapper.generation !== 直连世代 || remoteConnWrapper.socket !== initialSocket) return;
+        await connecttoPry();
+      });
+      if (仅建立连接) return initialSocket;
+    } catch (err) {
+      log(`[TCP转发] 直连 ${host}:${portNum} 失败: ${err.message}`);
+      if (remoteConnWrapper.generation !== 直连世代) throw err;
+      if (err instanceof Error && err.name === '预加载解析为空') {
+        closeSocketQuietly(ws);
+        throw err;
+      }
+      if (ws.readyState !== WebSocket.OPEN) throw err;
+      await connecttoPry();
+      if (仅建立连接) return remoteConnWrapper.socket;
+    }
+  }
 }

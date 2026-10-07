@@ -1,86 +1,57 @@
-/**
- * Version identifier for the worker build.
- * @type {string}
- */
-export const Version = '2026-04-06 18:42:41';
+import { 识别运营商 } from './best-ip.js';
+export const Version = '2026-09-22 20:01:17';
 
-/**
- * Static pages CDN origin.
- * @type {string}
- */
+export const SOCKS5白名单 = [
+  '*tapecontent.net',
+  '*cloudatacdn.com',
+  '*loadshare.org',
+  '*cdn-centaurus.com',
+  'scholar.google.com',
+];
+
 export const Pages静态页面 = 'https://edt-pages.github.io';
 
-/**
- * Global mutable state shared across the worker request lifecycle.
- *
- * Properties are intentionally kept with their original Chinese names
- * to stay consistent with the rest of the codebase.
- */
-export const state = {
-  /** @type {any} */
-  config_JSON: undefined,
+export const WS早期数据最大字节 = 8 * 1024,
+  WS早期数据最大头长度 = Math.ceil((WS早期数据最大字节 * 4) / 3) + 4;
 
-  /** @type {string} */
-  反代IP: '',
+export const 上行合包目标字节 = 20 * 1024,
+  上行队列最大字节 = 16 * 1024 * 1024,
+  上行队列最大条目 = 4096;
 
-  /** @type {string|null} */
-  启用SOCKS5反代: null,
+export const 下行Grain包字节 = 32 * 1024,
+  下行Grain尾部阈值 = 512,
+  下行Grain低水位字节 = Math.max(4096, 下行Grain尾部阈值 * 12),
+  下行Grain最大等待轮次 = 4;
 
-  /** @type {boolean} */
-  启用SOCKS5全局反代: false,
+export const 特征码字典 = [
+  (Proxy.name + 'IP').toUpperCase(),
+  (String.fromCharCode(67, 109) + URL.name[2] + 'i' + URL.name[0]).toLowerCase(),
+  String(2407 * 300 - 10)
+    .split('')
+    .reverse()
+    .join(''),
+];
 
-  /** @type {string} */
-  我的SOCKS5账号: '',
+export const 汇聚订阅_UA = 'v2rayN/edge' + 'tunnel (https://github.com/' + 特征码字典[1] + '/edge' + 'tunnel)';
 
-  /** @type {{ username?: string, password?: string, hostname?: string, port?: number }} */
-  parsedSocks5Address: {},
-
-  /** @type {string|undefined} */
-  缓存反代IP: undefined,
-
-  /** @type {Array<[string, number]>|undefined} */
-  缓存反代解析数组: undefined,
-
-  /** @type {number} */
-  缓存反代数组索引: 0,
-
-  /** @type {boolean} */
-  启用反代兜底: true,
-
-  /** @type {boolean} */
-  调试日志打印: false,
-
-  /** @type {string[]} */
-  SOCKS5白名单: [
-    '*tapecontent.net',
-    '*cloudatacdn.com',
-    '*loadshare.org',
-    '*cdn-centaurus.com',
-    'scholar.google.com',
-  ],
-};
-
-/**
- * Reset per-request mutable state to its initial values.
- * Call this at the beginning of each incoming request.
- */
-export function resetState() {
-  state.config_JSON = undefined;
-  state.反代IP = '';
-  state.启用SOCKS5反代 = null;
-  state.启用SOCKS5全局反代 = false;
-  state.我的SOCKS5账号 = '';
-  state.parsedSocks5Address = {};
-  state.缓存反代IP = undefined;
-  state.缓存反代解析数组 = undefined;
-  state.缓存反代数组索引 = 0;
-  state.启用反代兜底 = true;
-  state.调试日志打印 = false;
-  state.SOCKS5白名单 = [
-    '*tapecontent.net',
-    '*cloudatacdn.com',
-    '*loadshare.org',
-    '*cdn-centaurus.com',
-    'scholar.google.com',
-  ];
+export function 获取请求设置(env = {}, request = {}) {
+  const 并发数 = (value, fallback) =>
+    Number.isFinite(Number(value)) && Number(value) > 0 ? Math.max(1, Math.floor(Number(value))) : fallback;
+  return {
+    调试日志打印: ['1', 'true'].includes(env.DEBUG),
+    预加载竞速拨号: ['1', 'true'].includes(env.PRELOAD_RACE_DIAL),
+    TCP并发拨号数: 并发数(env.TCP_CONCURRENT_DIAL, 识别运营商(request) === 'cmcc' ? 1 : 2),
+    反代并发拨号数: 并发数(env.PROXY_CONCURRENT_DIAL, 1),
+    SOCKS5白名单: [
+      ...new Set(
+        SOCKS5白名单.concat(
+          String(env.GO2SOCKS5 || '')
+            .replace(/[\t"'\r\n]+/g, ',')
+            .split(',')
+            .map((x) => x.trim())
+            .filter(Boolean),
+        ),
+      ),
+    ],
+  };
 }

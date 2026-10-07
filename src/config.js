@@ -1,153 +1,203 @@
-import { state } from './state.js';
-import { log } from './utils/log.js';
+import { 获取请求设置, 特征码字典 } from './state.js';
 import { MD5MD5 } from './utils/crypto.js';
-import { 掩码敏感信息, 整理成数组 } from './utils/format.js';
-import { 随机路径 } from './utils/path.js';
-
-/**
- * Read and initialize config_JSON from KV storage.
- *
- * Builds the default config object, loads/saves config from KV,
- * validates UUID format, constructs node paths, generates subscription
- * tokens, and reads CF and Telegram config from KV.
- *
- * @param {object} env - Cloudflare Worker environment bindings
- * @param {string} hostname - The request hostname
- * @param {string} userID - The user UUID
- * @param {string} [UA="Mozilla/5.0"] - User-Agent string
- * @param {boolean} [重置配置=false] - Whether to reset config to defaults
- * @returns {Promise<object>} The resolved config_JSON object
- */
-export async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重置配置 = false) {
-  const _p = atob("UFJPWFlJUA==");
-  const host = hostname, Ali_DoH = "https://dns.alidns.com/dns-query", ECH_SNI = "cloudflare-ech.com", 占位符 = '{{IP:PORT}}', 初始化开始时间 = performance.now(), 默认配置JSON = {
-    TIME: new Date().toISOString(),
-    HOST: host,
-    HOSTS: [hostname],
-    UUID: userID,
-    PATH: "/",
-    协议类型: "v" + "le" + "ss",
-    传输协议: "ws",
-    gRPC模式: "gun",
-    gRPCUserAgent: UA,
-    跳过证书验证: false,
-    启用0RTT: false,
-    TLS分片: null,
-    随机路径: false,
-    ECH: false,
-    ECHConfig: {
-      DNS: Ali_DoH,
-      SNI: ECH_SNI,
-    },
-    SS: {
-      加密方式: "aes-128-gcm",
-      TLS: true,
-    },
-    Fingerprint: "chrome",
-    优选订阅生成: {
-      local: true, // true: 基于本地的优选地址  false: 优选订阅生成器
-      本地IP库: {
-        随机IP: true, // 当 随机IP 为true时生效，启用随机IP的数量，否则使用KV内的ADD.txt
-        随机数量: 16,
-        指定端口: -1,
+import { 整理成数组, 掩码敏感信息 } from './utils/format.js';
+import { 获取传输协议配置, 获取传输路径参数值 } from './subscription/transport.js';
+export async function 读取config_JSON(env, hostname, userID, UA = 'Mozilla/5.0', 重置配置 = false) {
+  let config_JSON;
+  const SOCKS5白名单 = 获取请求设置(env).SOCKS5白名单;
+  const _p = 特征码字典[0];
+  const host = hostname,
+    Ali_DoH = 'https://dns.alidns.com/dns-query',
+    ECH_SNI = 'cloudflare-ech.com',
+    占位符 = '{{IP:PORT}}',
+    初始化开始时间 = performance.now(),
+    默认配置JSON = {
+      TIME: new Date().toISOString(),
+      HOST: host,
+      HOSTS: [hostname],
+      UUID: userID,
+      PATH: '/',
+      ALPN: '',
+      协议类型: 'v' + 'le' + 'ss',
+      传输协议: 'ws',
+      gRPC模式: 'gun',
+      gRPCUserAgent: UA,
+      跳过证书验证: false,
+      启用0RTT: false,
+      TLS分片: null,
+      随机路径: false,
+      ECH: false,
+      ECHConfig: {
+        DNS: Ali_DoH,
+        SNI: ECH_SNI,
       },
-      SUB: null,
-      SUBNAME: "edge" + "tunnel",
-      SUBUpdateTime: 3, // 订阅更新时间（小时）
-      TOKEN: await MD5MD5(hostname + userID),
-    },
-    订阅转换配置: {
-      SUBAPI: "https://SUBAPI.cmliussss.net",
-      SUBCONFIG: "https://raw.githubusercontent.com/cmliu/ACL4SSR/refs/heads/main/Clash/config/ACL4SSR_Online_Mini_MultiMode_CF.ini",
-      SUBEMOJI: false,
-    },
-    反代: {
-      [_p]: "auto",
-      SOCKS5: {
-        启用: state.启用SOCKS5反代,
-        全局: state.启用SOCKS5全局反代,
-        账号: state.我的SOCKS5账号,
-        白名单: state.SOCKS5白名单,
+      SS: {
+        加密方式: 'aes-128-gcm',
+        TLS: true,
       },
-      路径模板: {
-        [_p]: "proxyip=" + 占位符,
+      Fingerprint: 'chrome',
+      优选订阅生成: {
+        local: true, // true: 基于本地的优选地址  false: 优选订阅生成器
+        本地IP库: {
+          随机IP: true, // 当 随机IP 为true时生效，启用随机IP的数量，否则使用KV内的ADD.txt
+          随机数量: 16,
+          指定端口: -1,
+        },
+        SUB: null,
+        SUBNAME: 'edge' + 'tunnel',
+        SUBUpdateTime: 3, // 订阅更新时间（小时）
+        TOKEN: await MD5MD5(hostname + userID),
+      },
+      订阅转换配置: {
+        SUBAPI: `https://SUBAPI.${特征码字典[1]}ssss.net`,
+        SUBCONFIG: `https://raw.githubusercontent.com/${特征码字典[1]}/ACL4SSR/refs/heads/main/Clash/config/ACL4SSR_Online_Mini_MultiMode_CF.ini`,
+        SUBEMOJI: false,
+        SUBLIST: false, //仅输出节点信息
+        UDP: false, // 启用 UDP
+        XUDP: false, // 启用 XUDP
+        TLS13: false, // 启用 TLS 1.3
+        APPEND_TYPE: false, // 插入节点类型
+        SORT: false, // 基础节点排序
+        EXPAND: true, // 展开规则全文
+      },
+      反代: {
+        [_p]: 'auto',
         SOCKS5: {
-          全局: "socks5://" + 占位符,
-          标准: "socks5=" + 占位符
+          启用: null,
+          全局: false,
+          账号: '',
+          白名单: SOCKS5白名单,
         },
-        HTTP: {
-          全局: "http://" + 占位符,
-          标准: "http=" + 占位符
+        路径模板: {
+          [_p]: 'proxyip=' + 占位符,
+          SOCKS5: {
+            全局: 'socks5://' + 占位符,
+            标准: 'socks5=' + 占位符,
+          },
+          HTTP: {
+            全局: 'http://' + 占位符,
+            标准: 'http=' + 占位符,
+          },
+          HTTPS: {
+            全局: 'https://' + 占位符,
+            标准: 'https=' + 占位符,
+          },
+          TURN: {
+            全局: 'turn://' + 占位符,
+            标准: 'turn=' + 占位符,
+          },
+          SSTP: {
+            全局: 'sstp://' + 占位符,
+            标准: 'sstp=' + 占位符,
+          },
         },
       },
-    },
-    TG: {
-      启用: false,
-      BotToken: null,
-      ChatID: null,
-    },
-    CF: {
-      Email: null,
-      GlobalAPIKey: null,
-      AccountID: null,
-      APIToken: null,
-      UsageAPI: null,
-      Usage: {
-        success: false,
-        pages: 0,
-        workers: 0,
-        total: 0,
-        max: 100000,
+      TG: {
+        启用: false,
+        BotToken: null,
+        ChatID: null,
       },
-    }
-  };
+      CF: {
+        Email: null,
+        GlobalAPIKey: null,
+        AccountID: null,
+        APIToken: null,
+        UsageAPI: null,
+        Usage: {
+          success: false,
+          pages: 0,
+          workers: 0,
+          total: 0,
+          max: 100000,
+        },
+      },
+    };
 
   try {
     let configJSON = await env.KV.get('config.json');
     if (!configJSON || 重置配置 == true) {
       await env.KV.put('config.json', JSON.stringify(默认配置JSON, null, 2));
-      state.config_JSON = 默认配置JSON;
+      config_JSON = 默认配置JSON;
     } else {
-      state.config_JSON = JSON.parse(configJSON);
+      config_JSON = 合并默认配置(默认配置JSON, JSON.parse(configJSON));
     }
   } catch (error) {
     console.error(`读取config_JSON出错: ${error.message}`);
-    state.config_JSON = 默认配置JSON;
+    config_JSON = 默认配置JSON;
   }
 
-  if (!state.config_JSON.gRPCUserAgent) state.config_JSON.gRPCUserAgent = UA;
-  state.config_JSON.HOST = host;
-  if (!state.config_JSON.HOSTS) state.config_JSON.HOSTS = [hostname];
-  if (env.HOST) state.config_JSON.HOSTS = (await 整理成数组(env.HOST)).map(h => h.toLowerCase().replace(/^https?:\/\//, '').split('/')[0].split(':')[0]);
-  state.config_JSON.UUID = userID;
-  if (!state.config_JSON.随机路径) state.config_JSON.随机路径 = false;
-  if (!state.config_JSON.启用0RTT) state.config_JSON.启用0RTT = false;
+  if (!config_JSON.订阅转换配置.SUBLIST) config_JSON.订阅转换配置.SUBLIST = false;
+  if (!config_JSON.订阅转换配置.UDP) config_JSON.订阅转换配置.UDP = false;
+  if (!config_JSON.订阅转换配置.XUDP) config_JSON.订阅转换配置.XUDP = false;
+  if (!config_JSON.订阅转换配置.TLS13) config_JSON.订阅转换配置.TLS13 = false;
+  if (!config_JSON.订阅转换配置.APPEND_TYPE) config_JSON.订阅转换配置.APPEND_TYPE = false;
+  if (!config_JSON.订阅转换配置.SORT) config_JSON.订阅转换配置.SORT = false;
+  if (typeof config_JSON.订阅转换配置.EXPAND !== 'boolean') config_JSON.订阅转换配置.EXPAND = true;
+  if (!config_JSON.gRPCUserAgent) config_JSON.gRPCUserAgent = UA;
+  config_JSON.HOST = host;
+  if (!config_JSON.HOSTS) config_JSON.HOSTS = [hostname];
+  if (env.HOST)
+    config_JSON.HOSTS = (await 整理成数组(env.HOST)).map(
+      (h) =>
+        h
+          .toLowerCase()
+          .replace(/^https?:\/\//, '')
+          .split('/')[0]
+          .split(':')[0],
+    );
+  config_JSON.UUID = userID;
+  if (!config_JSON.随机路径) config_JSON.随机路径 = false;
+  if (!config_JSON.启用0RTT) config_JSON.启用0RTT = false;
 
-  if (env.PATH) state.config_JSON.PATH = env.PATH.startsWith('/') ? env.PATH : '/' + env.PATH;
-  else if (!state.config_JSON.PATH) state.config_JSON.PATH = '/';
+  if (env.PATH) config_JSON.PATH = env.PATH.startsWith('/') ? env.PATH : '/' + env.PATH;
+  else if (!config_JSON.PATH) config_JSON.PATH = '/';
+  if (!config_JSON.ALPN) config_JSON.ALPN = '';
 
-  if (!state.config_JSON.gRPC模式) state.config_JSON.gRPC模式 = 'gun';
-  if (!state.config_JSON.SS) state.config_JSON.SS = { 加密方式: "aes-128-gcm", TLS: false };
+  if (!config_JSON.gRPC模式) config_JSON.gRPC模式 = 'gun';
+  if (!config_JSON.SS) config_JSON.SS = { 加密方式: 'aes-128-gcm', TLS: false };
 
-  if (!state.config_JSON.反代.路径模板?.[_p]) {
-    state.config_JSON.反代.路径模板 = {
-      [_p]: "proxyip=" + 占位符,
+  if (!config_JSON.反代.路径模板?.[_p]) {
+    config_JSON.反代.路径模板 = {
+      [_p]: 'proxyip=' + 占位符,
       SOCKS5: {
-        全局: "socks5://" + 占位符,
-        标准: "socks5=" + 占位符
+        全局: 'socks5://' + 占位符,
+        标准: 'socks5=' + 占位符,
       },
       HTTP: {
-        全局: "http://" + 占位符,
-        标准: "http=" + 占位符
+        全局: 'http://' + 占位符,
+        标准: 'http=' + 占位符,
+      },
+      HTTPS: {
+        全局: 'https://' + 占位符,
+        标准: 'https=' + 占位符,
+      },
+      TURN: {
+        全局: 'turn://' + 占位符,
+        标准: 'turn=' + 占位符,
+      },
+      SSTP: {
+        全局: 'sstp://' + 占位符,
+        标准: 'sstp=' + 占位符,
       },
     };
   }
+  if (!config_JSON.反代.路径模板.HTTPS)
+    config_JSON.反代.路径模板.HTTPS = { 全局: 'https://' + 占位符, 标准: 'https=' + 占位符 };
+  if (!config_JSON.反代.路径模板.TURN)
+    config_JSON.反代.路径模板.TURN = { 全局: 'turn://' + 占位符, 标准: 'turn=' + 占位符 };
+  if (!config_JSON.反代.路径模板.SSTP)
+    config_JSON.反代.路径模板.SSTP = { 全局: 'sstp://' + 占位符, 标准: 'sstp=' + 占位符 };
 
-  const 代理配置 = state.config_JSON.反代.路径模板[state.config_JSON.反代.SOCKS5.启用?.toUpperCase()];
+  const 代理配置 = config_JSON.反代.路径模板[config_JSON.反代.SOCKS5.启用?.toUpperCase()];
 
   let 路径反代参数 = '';
-  if (代理配置 && state.config_JSON.反代.SOCKS5.账号) 路径反代参数 = (state.config_JSON.反代.SOCKS5.全局 ? 代理配置.全局 : 代理配置.标准).replace(占位符, state.config_JSON.反代.SOCKS5.账号);
-  else if (state.config_JSON.反代[_p] !== 'auto') 路径反代参数 = state.config_JSON.反代.路径模板[_p].replace(占位符, state.config_JSON.反代[_p]);
+  if (代理配置 && config_JSON.反代.SOCKS5.账号)
+    路径反代参数 = (config_JSON.反代.SOCKS5.全局 ? 代理配置.全局 : 代理配置.标准).replace(
+      占位符,
+      config_JSON.反代.SOCKS5.账号,
+    );
+  else if (config_JSON.反代[_p] !== 'auto')
+    路径反代参数 = config_JSON.反代.路径模板[_p].replace(占位符, config_JSON.反代[_p]);
 
   let 反代查询参数 = '';
   if (路径反代参数.includes('?')) {
@@ -156,41 +206,57 @@ export async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0
     反代查询参数 = 反代查询部分;
   }
 
-  state.config_JSON.PATH = state.config_JSON.PATH.replace(路径反代参数, '').replace('//', '/');
-  const normalizedPath = state.config_JSON.PATH === '/' ? '' : state.config_JSON.PATH.replace(/\/+(?=\?|$)/, '').replace(/\/+$/, '');
+  config_JSON.PATH = config_JSON.PATH.replace(路径反代参数, '').replace('//', '/');
+  const normalizedPath =
+    config_JSON.PATH === '/' ? '' : config_JSON.PATH.replace(/\/+(?=\?|$)/, '').replace(/\/+$/, '');
   const [路径部分, ...查询数组] = normalizedPath.split('?');
   const 查询部分 = 查询数组.length ? '?' + 查询数组.join('?') : '';
   const 最终查询部分 = 反代查询参数 ? (查询部分 ? 查询部分 + '&' + 反代查询参数 : '?' + 反代查询参数) : 查询部分;
-  state.config_JSON.完整节点路径 = (路径部分 || '/') + (路径部分 && 路径反代参数 ? '/' : '') + 路径反代参数 + 最终查询部分 + (state.config_JSON.启用0RTT ? (最终查询部分 ? '&' : '?') + 'ed=2560' : '');
+  config_JSON.完整节点路径 =
+    (路径部分 || '/') +
+    (路径部分 && 路径反代参数 ? '/' : '') +
+    路径反代参数 +
+    最终查询部分 +
+    (config_JSON.启用0RTT ? (最终查询部分 ? '&' : '?') + 'ed=2560' : '');
 
-  if (!state.config_JSON.TLS分片 && state.config_JSON.TLS分片 !== null) state.config_JSON.TLS分片 = null;
-  const TLS分片参数 = state.config_JSON.TLS分片 == 'Shadowrocket' ? `&fragment=${encodeURIComponent('1,40-60,30-50,tlshello')}` : state.config_JSON.TLS分片 == 'Happ' ? `&fragment=${encodeURIComponent('3,1,tlshello')}` : '';
-  if (!state.config_JSON.Fingerprint) state.config_JSON.Fingerprint = "chrome";
-  if (!state.config_JSON.ECH) state.config_JSON.ECH = false;
-  if (!state.config_JSON.ECHConfig) state.config_JSON.ECHConfig = { DNS: Ali_DoH, SNI: ECH_SNI };
-  const ECHLINK参数 = state.config_JSON.ECH ? `&ech=${encodeURIComponent((state.config_JSON.ECHConfig.SNI ? state.config_JSON.ECHConfig.SNI + '+' : '') + state.config_JSON.ECHConfig.DNS)}` : '';
-  state.config_JSON.LINK = state.config_JSON.协议类型 === 'ss'
-    ? `${state.config_JSON.协议类型}://${btoa(state.config_JSON.SS.加密方式 + ':' + userID)}@${host}:${state.config_JSON.SS.TLS ? '443' : '80'}?plugin=v2${encodeURIComponent(`ray-plugin;mode=websocket;host=${host};path=${((state.config_JSON.完整节点路径.includes('?') ? state.config_JSON.完整节点路径.replace('?', '?enc=' + state.config_JSON.SS.加密方式 + '&') : (state.config_JSON.完整节点路径 + '?enc=' + state.config_JSON.SS.加密方式)) + (state.config_JSON.SS.TLS ? ';tls' : ''))};mux=0`) + ECHLINK参数}#${encodeURIComponent(state.config_JSON.优选订阅生成.SUBNAME)}`
-    : `${state.config_JSON.协议类型}://${userID}@${host}:443?security=tls&type=${state.config_JSON.传输协议 + ECHLINK参数}&host=${host}&fp=${state.config_JSON.Fingerprint}&sni=${host}&path=${encodeURIComponent(state.config_JSON.随机路径 ? 随机路径(state.config_JSON.完整节点路径) : state.config_JSON.完整节点路径) + TLS分片参数}&encryption=none${state.config_JSON.跳过证书验证 ? '&insecure=1&allowInsecure=1' : ''}#${encodeURIComponent(state.config_JSON.优选订阅生成.SUBNAME)}`;
-  state.config_JSON.优选订阅生成.TOKEN = await MD5MD5(hostname + userID);
+  if (!config_JSON.TLS分片 && config_JSON.TLS分片 !== null) config_JSON.TLS分片 = null;
+  const TLS分片参数 =
+    config_JSON.TLS分片 == 'Shadowrocket'
+      ? `&fragment=${encodeURIComponent('1,40-60,30-50,tlshello')}`
+      : config_JSON.TLS分片 == 'Happ'
+        ? `&fragment=${encodeURIComponent('3,1,tlshello')}`
+        : '';
+  if (!config_JSON.Fingerprint) config_JSON.Fingerprint = 'chrome';
+  if (!config_JSON.ECH) config_JSON.ECH = false;
+  if (!config_JSON.ECHConfig) config_JSON.ECHConfig = { DNS: Ali_DoH, SNI: ECH_SNI };
+  const ECHLINK参数 = config_JSON.ECH
+    ? `&ech=${encodeURIComponent((config_JSON.ECHConfig.SNI ? config_JSON.ECHConfig.SNI + '+' : '') + config_JSON.ECHConfig.DNS)}`
+    : '';
+  const { type: 传输协议, 路径字段名, 域名字段名 } = 获取传输协议配置(config_JSON);
+  const 传输路径参数值 = 获取传输路径参数值(config_JSON, config_JSON.完整节点路径);
+  config_JSON.LINK =
+    config_JSON.协议类型 === 'ss'
+      ? `${config_JSON.协议类型}://${btoa(config_JSON.SS.加密方式 + ':' + userID)}@${host}:${config_JSON.SS.TLS ? '443' : '80'}?plugin=v2${encodeURIComponent(`ray-plugin;mode=websocket;host=${host};path=${(config_JSON.完整节点路径.includes('?') ? config_JSON.完整节点路径.replace('?', '?enc=' + config_JSON.SS.加密方式 + '&') : config_JSON.完整节点路径 + '?enc=' + config_JSON.SS.加密方式) + (config_JSON.SS.TLS ? ';tls' : '')};mux=0`) + ECHLINK参数}#${encodeURIComponent(config_JSON.优选订阅生成.SUBNAME)}`
+      : `${config_JSON.协议类型}://${userID}@${host}:443?security=tls&type=${传输协议 + ECHLINK参数}&${域名字段名}=${host}&fp=${config_JSON.Fingerprint}&sni=${host}&${路径字段名}=${encodeURIComponent(传输路径参数值) + TLS分片参数}&encryption=none&alpn=${encodeURIComponent(config_JSON.ALPN)}#${encodeURIComponent(config_JSON.优选订阅生成.SUBNAME)}`;
+  config_JSON.优选订阅生成.TOKEN = await MD5MD5(hostname + userID);
 
   const 初始化TG_JSON = { BotToken: null, ChatID: null };
-  state.config_JSON.TG = { 启用: state.config_JSON.TG.启用 ? state.config_JSON.TG.启用 : false, ...初始化TG_JSON };
+  config_JSON.TG = { 启用: config_JSON.TG.启用 ? config_JSON.TG.启用 : false, ...初始化TG_JSON };
   try {
     const TG_TXT = await env.KV.get('tg.json');
     if (!TG_TXT) {
       await env.KV.put('tg.json', JSON.stringify(初始化TG_JSON, null, 2));
     } else {
       const TG_JSON = JSON.parse(TG_TXT);
-      state.config_JSON.TG.ChatID = TG_JSON.ChatID ? TG_JSON.ChatID : null;
-      state.config_JSON.TG.BotToken = TG_JSON.BotToken ? 掩码敏感信息(TG_JSON.BotToken) : null;
+      config_JSON.TG.ChatID = TG_JSON.ChatID ? TG_JSON.ChatID : null;
+      config_JSON.TG.BotToken = TG_JSON.BotToken ? 掩码敏感信息(TG_JSON.BotToken) : null;
     }
   } catch (error) {
     console.error(`读取tg.json出错: ${error.message}`);
   }
 
   const 初始化CF_JSON = { Email: null, GlobalAPIKey: null, AccountID: null, APIToken: null, UsageAPI: null };
-  state.config_JSON.CF = { ...初始化CF_JSON, Usage: { success: false, pages: 0, workers: 0, total: 0, max: 100000 } };
+  config_JSON.CF = { ...初始化CF_JSON, Usage: { success: false, pages: 0, workers: 0, total: 0, max: 100000 } };
   try {
     const CF_TXT = await env.KV.get('cf.json');
     if (!CF_TXT) {
@@ -201,23 +267,34 @@ export async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0
         try {
           const response = await fetch(CF_JSON.UsageAPI);
           const Usage = await response.json();
-          state.config_JSON.CF.Usage = Usage;
+          config_JSON.CF.Usage = Usage;
         } catch (err) {
           console.error(`请求 CF_JSON.UsageAPI 失败: ${err.message}`);
         }
       } else {
-        state.config_JSON.CF.Email = CF_JSON.Email ? CF_JSON.Email : null;
-        state.config_JSON.CF.GlobalAPIKey = CF_JSON.GlobalAPIKey ? 掩码敏感信息(CF_JSON.GlobalAPIKey) : null;
-        state.config_JSON.CF.AccountID = CF_JSON.AccountID ? 掩码敏感信息(CF_JSON.AccountID) : null;
-        state.config_JSON.CF.APIToken = CF_JSON.APIToken ? 掩码敏感信息(CF_JSON.APIToken) : null;
-        state.config_JSON.CF.UsageAPI = null;
-        state.config_JSON.CF.Usage = null;
+        config_JSON.CF.Email = CF_JSON.Email ? CF_JSON.Email : null;
+        config_JSON.CF.GlobalAPIKey = CF_JSON.GlobalAPIKey ? 掩码敏感信息(CF_JSON.GlobalAPIKey) : null;
+        config_JSON.CF.AccountID = CF_JSON.AccountID ? 掩码敏感信息(CF_JSON.AccountID) : null;
+        config_JSON.CF.APIToken = CF_JSON.APIToken ? 掩码敏感信息(CF_JSON.APIToken) : null;
+        config_JSON.CF.UsageAPI = null;
+        const Usage = null;
+        config_JSON.CF.Usage = Usage;
       }
     }
   } catch (error) {
     console.error(`读取cf.json出错: ${error.message}`);
   }
 
-  state.config_JSON.加载时间 = (performance.now() - 初始化开始时间).toFixed(2) + 'ms';
-  return state.config_JSON;
+  config_JSON.加载时间 = (performance.now() - 初始化开始时间).toFixed(2) + 'ms';
+  return config_JSON;
+}
+
+export function 合并默认配置(defaults, saved) {
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return structuredClone(defaults);
+  const result = { ...saved };
+  for (const [key, value] of Object.entries(defaults)) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) result[key] = 合并默认配置(value, saved[key]);
+    else if (saved[key] === undefined) result[key] = structuredClone(value);
+  }
+  return result;
 }

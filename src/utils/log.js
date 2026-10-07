@@ -1,8 +1,6 @@
-import { state } from '../state.js';
-
-/**
- * @param  {...any} args
- */
-export function log(...args) {
-	if (state.调试日志打印) console.log(...args);
+export function 创建日志器(enabled = false) {
+  return (...args) => {
+    if (enabled) console.log(...args);
+  };
 }
+export const log = 创建日志器();
